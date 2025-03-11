@@ -3,7 +3,6 @@ import torch
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from functools import partial
-from pathlib import Path
 
 from megatron.core import parallel_state
 from megatron.core import dist_checkpointing
@@ -87,8 +86,6 @@ def forward_step_func(data_iterator, model):
         losses = output_tensor.float()
         loss_mask = loss_mask.view(-1).float()
         loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
-        # If you have data parallel reduce loss across data parallel groups.
-        # If pipeline parallel, loss computation is done only in last stage.
 
         return loss, {'lm loss': loss}
 
@@ -146,17 +143,6 @@ def silicon_main():
         optim.step()
 
         print(f'Losses reduced :  {losses_reduced}')
-
-    # Saving the model
-    ckpt_path = os.getcwd() + '/ckpt'
-    Path(ckpt_path).mkdir(exist_ok=True)
-    save_distributed_checkpoint(gpt_model=gpt_model, checkpoint_path=ckpt_path)
-
-    # Loading the model
-    gpt_model = load_distributed_checkpoint(gpt_model=gpt_model, checkpoint_path=ckpt_path)
-    gpt_model.to(device)
-    print('Successfully loaded the model')
-
 
 def estimated_main():
     pass
