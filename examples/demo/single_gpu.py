@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 
-from memory_profiler import MemoryEstimator
+from memory_profiler import MemoryTracer
 
 class MLP(nn.Module):
     """A minimal MLP layer for testing."""
@@ -45,7 +45,7 @@ dtype = torch.float16
 
 def run_estimation():
     """Run memory estimation test with a minimal model."""
-    estimator = MemoryEstimator(device=device)
+    estimator = MemoryTracer(device=device)
     torch.set_default_device('cuda:0')
 
     # Use fake tensors and track memory

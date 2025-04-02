@@ -4,10 +4,10 @@ Megatron-LM emulator module for memory usage estimation and other emulation feat
 
 from .memory_dispatch_mode import (
     MemoryDispatchMode,
-    MemoryEstimator,
+    MemoryTracer,
 )
 
 __all__ = [
     'MemoryDispatchMode',
-    'MemoryEstimator',
+    'MemoryTracer',
 ] 

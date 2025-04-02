@@ -5,6 +5,12 @@ import functools
 import contextlib
 from collections import defaultdict
 
+def print_rank_0(message):
+    if torch.distributed.is_initialized():
+        if torch.distributed.get_rank() == 0:
+            print(message)
+    else:
+        print(message)
 
 class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
     def __init__(self):
@@ -18,15 +24,68 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
 
         self.phase_tensor_modules = defaultdict(list)
         self.current_phase = "initialization"
-    
+
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs if kwargs is not None else {}
+        
+        # List of problematic operations that need special handling
+        problematic_ops = [
+            "_local_scalar_dense",  # Data-dependent scalar conversion
+            "random_",              # Random generation
+            "item",                 # Tensor to scalar conversion
+            "c10d.allreduce_",      # Distributed communication
+            "c10d.broadcast",       # Distributed communication  
+            "c10d.reduce",          # Distributed communication
+            "c10d.scatter",         # Distributed communication
+            "c10d.gather",          # Distributed communication
+            "c10d.all_gather",      # Distributed communication
+            "c10d.reduce_scatter",  # Distributed communication
+            "c10d.all_to_all"       # Distributed communication
+        ]
 
+        # Check if this is an operation that we need to handle specially
+        func_name = str(func)
+        
+        # Handle distributed operations more directly
+        if any(op_name in func_name for op_name in problematic_ops):
+            # Special handling for distributed operations
+            if "c10d." in func_name:
+                # For allreduce and other collective operations, return the input tensor 
+                # without trying to actually execute the operation
+                if len(args) > 0:
+                    if isinstance(args[0], torch.Tensor):
+                        return args[0].clone()  # Return a clone of the first tensor
+                    elif isinstance(args[0], list) and len(args[0]) > 0 and isinstance(args[0][0], torch.Tensor):
+                        return args[0][0].clone()  # Return a clone of the first tensor in the list
+                    else:
+                        print_rank_0(f"Handling distributed operation: {func_name}")
+                        return None
+            
+            # For random operations
+            elif "random_" in func_name:
+                return args[0]  # Return the input tensor unchanged
+                
+            # For scalar conversion operations
+            elif "_local_scalar_dense" in func_name or "item" in func_name:
+                return 42  # Return a fixed scalar value
+            
+            # Try with disabled fake tensor mode, but handle exceptions gracefully
+            try:
+                with torch._subclasses.fake_tensor._disable_fake_tensor_mode():
+                    return func(*args, **kwargs)
+            except Exception as e:
+                print_rank_0(f"Handling problematic operation gracefully: {func_name}")
+                if len(args) > 0 and isinstance(args[0], torch.Tensor):
+                    return args[0]  # Default fallback: return the input tensor
+                return None
+        
         current_module = self.current_module_path
         outputs = func(*args, **kwargs)
 
         # Track all output tensors' memory usage and record their creation module
-        tree_map_only(torch.Tensor, lambda t: self.track_tensor_memory(t, current_module), outputs)
+        tree_map_only(
+            torch.Tensor, lambda t: self.track_tensor_memory(t, current_module), outputs
+        )
 
         return outputs
 
@@ -36,7 +95,7 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
 
         device_id = tensor.device.index
         if device_id is None:
-            device_id = 'cpu'
+            device_id = "cpu"
 
         # Calculate memory usage
         nbytes = tensor.untyped_storage().nbytes()
@@ -48,7 +107,8 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
 
         self.current_memory_per_device[device_id] += nbytes
         self.peak_memory_per_device[device_id] = max(
-            self.peak_memory_per_device[device_id], self.current_memory_per_device[device_id]
+            self.peak_memory_per_device[device_id],
+            self.current_memory_per_device[device_id],
         )
 
         # Record which module created this tensor
@@ -67,7 +127,12 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         )
         # Record which phase the tensor was created in, and which module it belongs to
         self.phase_tensor_modules[self.current_phase].append(
-            {'module': module_path, 'size': nbytes, 'shape': tensor.shape, 'device': tensor.device}
+            {
+                "module": module_path,
+                "size": nbytes,
+                "shape": tensor.shape,
+                "device": tensor.device,
+            }
         )
 
     def make_module_pre_forward_hook(self):
@@ -103,7 +168,9 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         # Register hook to the main module and all submodules
         for m in [module] + list(module.modules()):
             handles.append(m.register_forward_hook(forward_hook))
-            handles.append(m.register_forward_pre_hook(pre_forward_hook, with_kwargs=True))
+            handles.append(
+                m.register_forward_pre_hook(pre_forward_hook, with_kwargs=True)
+            )
 
         return handles
 
@@ -138,20 +205,22 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         report = {}
         for phase, tensors in self.phase_tensor_modules.items():
             # 按module分组统计
-            module_stats = defaultdict(lambda: {'count': 0, 'total_size': 0, 'shapes': []})
+            module_stats = defaultdict(
+                lambda: {"count": 0, "total_size": 0, "shapes": []}
+            )
 
             for tensor_info in tensors:
-                module = tensor_info['module']
-                module_stats[module]['count'] += 1
-                module_stats[module]['total_size'] += tensor_info['size']
-                module_stats[module]['shapes'].append(tensor_info['shape'])
+                module = tensor_info["module"]
+                module_stats[module]["count"] += 1
+                module_stats[module]["total_size"] += tensor_info["size"]
+                module_stats[module]["shapes"].append(tensor_info["shape"])
 
             # 格式化报告
             report[phase] = {
                 module: {
-                    'count': stats['count'],
-                    'total_size_mb': f"{stats['total_size'] / (1024**2):.2f} MB",
-                    'shapes': stats['shapes'],
+                    "count": stats["count"],
+                    "total_size_mb": f"{stats['total_size'] / (1024**2):.2f} MB",
+                    "shapes": stats["shapes"],
                 }
                 for module, stats in module_stats.items()
             }
@@ -168,11 +237,11 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             self.module_stack.pop()
 
 
-class MemoryEstimator:
+class MemoryTracer:
 
     def __init__(self, device="cuda"):
         """
-        Initialize the MemoryEstimator.
+        Initialize the MemoryTracer.
 
         Args:
             device (str): The device to emulate, default is "cuda"
@@ -184,14 +253,16 @@ class MemoryEstimator:
 
             self.fake_mode = FakeTensorMode(allow_non_fake_inputs=True)
         except ImportError:
-            raise ImportError("FakeTensorMode not found. Please use PyTorch version >= 1.12.0")
+            raise ImportError(
+                "FakeTensorMode not found. Please use PyTorch version >= 1.12.0"
+            )
 
         self.op_counts = defaultdict(int)
         self.op_memory = defaultdict(int)
         self.phase_memory = defaultdict(int)
         self.current_phase = "initialization"
-    
-    def to_fake_tensor(self, tensor, device=None):
+
+    def create_fake_tensor_from_tensor(self, tensor, device=None):
         """
         Convert a real tensor to a fake tensor.
 
@@ -207,13 +278,14 @@ class MemoryEstimator:
 
         with self.fake_mode:
             fake_tensor = torch.empty(
-                tensor.shape, dtype=tensor.dtype, device=device, requires_grad=tensor.requires_grad
+                tensor.shape,
+                dtype=tensor.dtype,
+                device=device,
+                requires_grad=tensor.requires_grad,
             )
         return fake_tensor
 
-    def create_fake_tensor(
-        self, *shape, dtype=torch.float16, device=None
-    ):
+    def create_fake_tensor(self, *shape, dtype=torch.float16, device=None):
         """
         Create a fake batch of input data.
 
@@ -229,9 +301,7 @@ class MemoryEstimator:
             device = self.device
 
         with self.fake_mode:
-            fake_input = torch.empty(
-                shape, dtype=dtype, device=device
-            )
+            fake_input = torch.empty(shape, dtype=dtype, device=device)
         return fake_input
 
     def __enter__(self):
@@ -244,7 +314,7 @@ class MemoryEstimator:
         """Exit the context manager, disabling both fake tensors and memory estimation."""
         self.memory_dispatch_mode.__exit__(exc_type, exc_val, exc_tb)
         return self.fake_mode.__exit__(exc_type, exc_val, exc_tb)
-    
+
     def get_max_memory_allocated(self):
         """Get the maximum memory allocated during the context manager."""
         return self.memory_dispatch_mode.peak_memory_per_device
@@ -290,7 +360,8 @@ class MemoryEstimator:
             },
             "module_memory": self.memory_dispatch_mode.get_module_memory_report(),
             "phase_memory": {
-                phase: f"{mem / (1024**2):.2f} MB" for phase, mem in self.phase_memory.items()
+                phase: f"{mem / (1024**2):.2f} MB"
+                for phase, mem in self.phase_memory.items()
             },
             "operation_counts": dict(self.op_counts),
         }
