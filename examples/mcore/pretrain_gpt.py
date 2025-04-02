@@ -36,8 +36,8 @@ def model_provider():
     """Build the model."""
 
     transformer_config = TransformerConfig(
-        num_layers=4, 
-        hidden_size=16, 
+        num_layers=8, 
+        hidden_size=1024, 
         num_attention_heads=16, 
         use_cpu_initialization=True, 
         pipeline_dtype=torch.float32,
@@ -84,7 +84,9 @@ def print_rank0(message):
         print(message)
 
 def silicon_main():
-    initialize_distributed(tensor_model_parallel_size=2, pipeline_model_parallel_size=1)
+    if not torch.distributed.is_initialized():
+        initialize_distributed(tensor_model_parallel_size=2, pipeline_model_parallel_size=1)
+    torch.set_default_device(torch.device('cpu'))
     model_parallel_cuda_manual_seed(123)
 
     rank = torch.distributed.get_rank()
@@ -144,7 +146,7 @@ def silicon_main():
 def estimated_main():
     """Run memory estimation with the GPT model."""
     # Create memory tracer
-    device = 'cuda'
+    device = torch.device('cuda')
     estimator = MemoryTracer(device=device)
     torch.set_default_device(device)
     
@@ -209,9 +211,11 @@ def estimated_main():
                 decoder_seq_length=_SEQUENCE_LENGTH,
                 forward_only=False)
 
-            print_rank0(f"profiled current_memory_allocated after forward-backward pass: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB")
+            if torch.distributed.get_rank() == 0:
+                print_rank0(f"profiled current_memory_allocated after forward-backward pass: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB")
             optim.step()
-            print_rank0(f"profiled current_memory_allocated after optimizer step: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB")
+            if torch.distributed.get_rank() == 0:
+                print_rank0(f"profiled current_memory_allocated after optimizer step: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB")
 
         # Remove hooks
         estimator.memory_dispatch_mode.remove_hooks(hook_handles)
@@ -224,4 +228,4 @@ if __name__ == "__main__":
     torch.cuda.reset_peak_memory_stats()
     
     # Then run the actual model
-    # silicon_main()
+    silicon_main()
