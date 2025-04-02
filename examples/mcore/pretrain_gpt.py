@@ -25,7 +25,7 @@ def initialize_distributed(tensor_model_parallel_size=1, pipeline_model_parallel
 
     # Torch setup for distributed training
     rank = int(os.environ['LOCAL_RANK'])
-    world_size = torch.cuda.device_count()
+    world_size = int(os.environ['WORLD_SIZE'])
     torch.cuda.set_device(rank)
     torch.distributed.init_process_group(world_size=world_size, rank=rank)
 
@@ -37,7 +37,7 @@ def model_provider():
 
     transformer_config = TransformerConfig(
         num_layers=4, 
-        hidden_size=1024, 
+        hidden_size=16, 
         num_attention_heads=16, 
         use_cpu_initialization=True, 
         pipeline_dtype=torch.float32,
@@ -45,7 +45,7 @@ def model_provider():
 
     gpt_model = GPTModel(
         config=transformer_config, 
-        transformer_layer_spec=get_gpt_layer_local_spec(), 
+        transformer_layer_spec=get_gpt_layer_local_spec(normalization="RMSNorm"), 
         vocab_size=100, 
         max_sequence_length=_SEQUENCE_LENGTH,
     )

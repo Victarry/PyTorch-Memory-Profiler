@@ -33,14 +33,6 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             "_local_scalar_dense",  # Data-dependent scalar conversion
             "random_",              # Random generation
             "item",                 # Tensor to scalar conversion
-            "c10d.allreduce_",      # Distributed communication
-            "c10d.broadcast",       # Distributed communication  
-            "c10d.reduce",          # Distributed communication
-            "c10d.scatter",         # Distributed communication
-            "c10d.gather",          # Distributed communication
-            "c10d.all_gather",      # Distributed communication
-            "c10d.reduce_scatter",  # Distributed communication
-            "c10d.all_to_all"       # Distributed communication
         ]
 
         # Check if this is an operation that we need to handle specially
@@ -48,27 +40,12 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         
         # Handle distributed operations more directly
         if any(op_name in func_name for op_name in problematic_ops):
-            # Special handling for distributed operations
-            if "c10d." in func_name:
-                # For allreduce and other collective operations, return the input tensor 
-                # without trying to actually execute the operation
-                if len(args) > 0:
-                    if isinstance(args[0], torch.Tensor):
-                        return args[0].clone()  # Return a clone of the first tensor
-                    elif isinstance(args[0], list) and len(args[0]) > 0 and isinstance(args[0][0], torch.Tensor):
-                        return args[0][0].clone()  # Return a clone of the first tensor in the list
-                    else:
-                        print_rank_0(f"Handling distributed operation: {func_name}")
-                        return None
-            
             # For random operations
-            elif "random_" in func_name:
+            if "random_" in func_name:
                 return args[0]  # Return the input tensor unchanged
-                
             # For scalar conversion operations
             elif "_local_scalar_dense" in func_name or "item" in func_name:
                 return 42  # Return a fixed scalar value
-            
             # Try with disabled fake tensor mode, but handle exceptions gracefully
             try:
                 with torch._subclasses.fake_tensor._disable_fake_tensor_mode():
@@ -80,7 +57,13 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
                 return None
         
         current_module = self.current_module_path
-        outputs = func(*args, **kwargs)
+        try:
+            outputs = func(*args, **kwargs)
+        except Exception as e:
+            print_rank_0(f"Error in {func_name}: {str(e)}")
+
+            print(func_name, args)
+            return None
 
         # Track all output tensors' memory usage and record their creation module
         tree_map_only(
@@ -306,12 +289,74 @@ class MemoryTracer:
 
     def __enter__(self):
         """Enter the context manager, enabling both fake tensors and memory estimation."""
+        # Patch torch.distributed functions to handle fake tensors
+        if hasattr(torch, 'distributed') and torch.distributed.is_available():
+            # Import FakeTensor for proper type checking
+            from torch._subclasses.fake_tensor import FakeTensor
+            
+            original_funcs = {}
+            
+            # Get all distributed functions that might need patching
+            dist_functions = [name for name in dir(torch.distributed) 
+                             if callable(getattr(torch.distributed, name)) 
+                             and not name.startswith('_')]
+            
+            # Create patches for each distributed function
+            for func_name in dist_functions:
+                original_func = getattr(torch.distributed, func_name)
+                original_funcs[func_name] = original_func
+                
+                # Define the patched function
+                def make_patched_dist_func(orig_func):
+                    @functools.wraps(orig_func)
+                    def patched_dist_func(*args, **kwargs):
+                        # Check if any of the arguments are fake tensors
+                        has_fake_tensor = any(
+                            isinstance(arg, FakeTensor)
+                            for arg in args
+                            if isinstance(arg, torch.Tensor)
+                        )
+                        
+                        # Also check in kwargs
+                        has_fake_tensor = has_fake_tensor or any(
+                            isinstance(arg, FakeTensor)
+                            for arg in kwargs.values()
+                            if isinstance(arg, torch.Tensor)
+                        )
+                        
+                        if has_fake_tensor:
+                            # If there are fake tensors, return copies of input tensors
+                            if len(args) > 0 and isinstance(args[0], torch.Tensor):
+                                return args[0].clone()
+                            # Check if there's a tensor in kwargs to return
+                            for arg in kwargs.values():
+                                if isinstance(arg, torch.Tensor):
+                                    return arg.clone()
+                            # If no tensor found, just return None
+                            return None
+                        
+                        # Otherwise, call the original function
+                        return orig_func(*args, **kwargs)
+                    
+                    return patched_dist_func
+                
+                # Set the patched function
+                setattr(torch.distributed, func_name, make_patched_dist_func(original_func))
+            
+            # Store original functions to restore them on exit
+            self._original_dist_funcs = original_funcs
+        
         self.fake_mode.__enter__()
         self.memory_dispatch_mode.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exit the context manager, disabling both fake tensors and memory estimation."""
+        # Restore original distributed functions
+        if hasattr(self, '_original_dist_funcs'):
+            for func_name, orig_func in self._original_dist_funcs.items():
+                setattr(torch.distributed, func_name, orig_func)
+        
         self.memory_dispatch_mode.__exit__(exc_type, exc_val, exc_tb)
         return self.fake_mode.__exit__(exc_type, exc_val, exc_tb)
 
