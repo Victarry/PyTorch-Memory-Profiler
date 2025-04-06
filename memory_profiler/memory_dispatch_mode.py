@@ -4,6 +4,7 @@ import weakref
 import functools
 import contextlib
 from collections import defaultdict
+from abc import ABC, abstractmethod
 
 def print_rank_0(message):
     if torch.distributed.is_initialized():
@@ -11,6 +12,239 @@ def print_rank_0(message):
             print(message)
     else:
         print(message)
+
+# 基础插件抽象类
+class TracerPlugin(ABC):
+    """Base abstract class for MemoryTracer plugins."""
+    
+    @abstractmethod
+    def setup(self, tracer):
+        """Setup the plugin with the tracer instance."""
+        pass
+    
+    @abstractmethod
+    def enter(self):
+        """Called when entering the tracer context."""
+        pass
+    
+    @abstractmethod
+    def exit(self, exc_type, exc_val, exc_tb):
+        """Called when exiting the tracer context."""
+        pass
+
+# 分布式功能插件
+class DistributedPlugin(TracerPlugin):
+    """Plugin for handling distributed operations with fake tensors."""
+    
+    def setup(self, tracer):
+        self.tracer = tracer
+        self.original_funcs = {}
+    
+    def enter(self):
+        if not hasattr(torch, 'distributed') or not torch.distributed.is_available():
+            return
+        
+        # Import FakeTensor for proper type checking
+        from torch._subclasses.fake_tensor import FakeTensor
+        
+        # Get all distributed functions that might need patching
+        dist_functions = [name for name in dir(torch.distributed) 
+                         if callable(getattr(torch.distributed, name)) 
+                         and not name.startswith('_')]
+        
+        # Create patches for each distributed function
+        for func_name in dist_functions:
+            original_func = getattr(torch.distributed, func_name)
+            self.original_funcs[func_name] = original_func
+            
+            # Define the patched function
+            def make_patched_dist_func(orig_func):
+                @functools.wraps(orig_func)
+                def patched_dist_func(*args, **kwargs):
+                    # Check if any of the arguments are fake tensors
+                    has_fake_tensor = any(
+                        isinstance(arg, FakeTensor)
+                        for arg in args
+                        if isinstance(arg, torch.Tensor)
+                    )
+                    
+                    # Also check in kwargs
+                    has_fake_tensor = has_fake_tensor or any(
+                        isinstance(arg, FakeTensor)
+                        for arg in kwargs.values()
+                        if isinstance(arg, torch.Tensor)
+                    )
+                    
+                    if has_fake_tensor:
+                        # If there are fake tensors, return copies of input tensors
+                        if len(args) > 0 and isinstance(args[0], torch.Tensor):
+                            output = args[0].clone()
+                            output.wait = lambda: None
+                            return output
+                        # Check if there's a tensor in kwargs to return
+                        for arg in kwargs.values():
+                            if isinstance(arg, torch.Tensor):
+                                return arg.clone()
+                        # If no tensor found, just return None
+                        return None
+                    
+                    # Otherwise, call the original function
+                    return orig_func(*args, **kwargs)
+                
+                return patched_dist_func
+            
+            # Set the patched function
+            setattr(torch.distributed, func_name, make_patched_dist_func(original_func))
+    
+    def exit(self, exc_type, exc_val, exc_tb):
+        # Restore original distributed functions
+        for func_name, orig_func in self.original_funcs.items():
+            setattr(torch.distributed, func_name, orig_func)
+
+# TransformerEngine插件
+class TransformerEnginePlugin(TracerPlugin):
+    """Plugin for handling transformer_engine operations with fake tensors."""
+    
+    def setup(self, tracer):
+        self.tracer = tracer
+        self.original_te_funcs = {}
+    
+    def enter(self):
+        try:
+            import transformer_engine
+            import transformer_engine.pytorch.ops as te_ops
+            from torch._subclasses.fake_tensor import FakeTensor
+            
+            # Patch forward methods on transformer_engine module ops
+            for op_name in dir(te_ops):
+                op_obj = getattr(te_ops, op_name)
+                if hasattr(op_obj, 'forward') and callable(getattr(op_obj, 'forward')):
+                    try:
+                        orig_forward = getattr(op_obj, 'forward')
+                        self.original_te_funcs[f"{op_name}.forward"] = orig_forward
+                        
+                        # Create patched forward method
+                        def make_patched_te_forward(orig_func, op_name):
+                            @functools.wraps(orig_func)
+                            def patched_forward(self, *args, **kwargs):
+                                # Check if any argument is a fake tensor
+                                has_fake = any(
+                                    isinstance(arg, FakeTensor)
+                                    for arg in args
+                                    if isinstance(arg, torch.Tensor)
+                                )
+                                
+                                has_fake = has_fake or any(
+                                    isinstance(arg, FakeTensor)
+                                    for arg in kwargs.values()
+                                    if isinstance(arg, torch.Tensor)
+                                )
+                                
+                                if has_fake:
+                                    print_rank_0(f"Handling fake tensor in {op_name}")
+                                    # For LayerNorm, return input with same shape 
+                                    if "LayerNorm" in op_name:
+                                        if len(args) > 0 and isinstance(args[0], torch.Tensor):
+                                            return args[0].clone()
+                                    
+                                    # For other operations, try to determine output shape
+                                    # based on operation type and input shapes
+                                    for arg in args:
+                                        if isinstance(arg, torch.Tensor):
+                                            return arg.clone()
+                                    
+                                    # Fallback
+                                    for arg in kwargs.values():
+                                        if isinstance(arg, torch.Tensor):
+                                            return arg.clone()
+                                    
+                                    return None
+                                
+                                return orig_func(self, *args, **kwargs)
+                            
+                            return patched_forward
+                        
+                        # Apply the patch
+                        setattr(op_obj, 'forward', make_patched_te_forward(orig_forward, op_name))
+                    except Exception as e:
+                        print_rank_0(f"Failed to patch {op_name}: {e}")
+                
+            # Patch specific problematic functions in transformer_engine
+            if hasattr(transformer_engine.pytorch.ops.basic.layer_norm, 'layernorm_fwd'):
+                orig_layernorm_fwd = transformer_engine.pytorch.ops.basic.layer_norm.layernorm_fwd
+                self.original_te_funcs["layernorm_fwd"] = orig_layernorm_fwd
+                
+                def patched_layernorm_fwd(*args, **kwargs):
+                    # Check for fake tensors
+                    has_fake = any(
+                        isinstance(arg, FakeTensor)
+                        for arg in args
+                        if isinstance(arg, torch.Tensor)
+                    )
+                    
+                    has_fake = has_fake or any(
+                        isinstance(arg, FakeTensor)
+                        for arg in kwargs.values()
+                        if isinstance(arg, torch.Tensor)
+                    )
+                    
+                    if has_fake:
+                        print_rank_0("Handling fake tensor in layernorm_fwd")
+                        # Get input tensor
+                        input_tensor = None
+                        for arg in args:
+                            if isinstance(arg, torch.Tensor):
+                                input_tensor = arg
+                                break
+                        
+                        if input_tensor is not None:
+                            # Create fake output and stats tensors
+                            output = input_tensor.clone()
+                            # Create fake mean and rstdev tensors with appropriate shapes
+                            if len(input_tensor.shape) > 1:
+                                reduced_shape = list(input_tensor.shape[:-1]) + [1]
+                                means = torch.zeros(reduced_shape, 
+                                                  dtype=input_tensor.dtype, 
+                                                  device=input_tensor.device)
+                                rstdevs = torch.ones(reduced_shape, 
+                                                   dtype=input_tensor.dtype, 
+                                                   device=input_tensor.device)
+                            else:
+                                means = torch.zeros(1, dtype=input_tensor.dtype, device=input_tensor.device)
+                                rstdevs = torch.ones(1, dtype=input_tensor.dtype, device=input_tensor.device)
+                            
+                            return output, means, rstdevs
+                        
+                        return None, None, None
+                    
+                    return orig_layernorm_fwd(*args, **kwargs)
+                
+                transformer_engine.pytorch.ops.basic.layer_norm.layernorm_fwd = patched_layernorm_fwd
+            
+        except ImportError:
+            print_rank_0("transformer_engine not found, skipping patching")
+        except Exception as e:
+            print_rank_0(f"Error patching transformer_engine: {e}")
+    
+    def exit(self, exc_type, exc_val, exc_tb):
+        # Restore original transformer_engine functions
+        try:
+            import transformer_engine
+            import transformer_engine.pytorch.ops as te_ops
+            
+            # Restore each patched function
+            for func_path, orig_func in self.original_te_funcs.items():
+                if "." in func_path:
+                    module_name, func_name = func_path.split(".")
+                    if hasattr(te_ops, module_name):
+                        module = getattr(te_ops, module_name)
+                        setattr(module, func_name, orig_func)
+                elif func_path == "layernorm_fwd":
+                    transformer_engine.pytorch.ops.basic.layer_norm.layernorm_fwd = orig_func
+        except ImportError:
+            pass
+        except Exception as e:
+            print_rank_0(f"Error restoring transformer_engine functions: {e}")
 
 class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
     def __init__(self):
@@ -244,6 +478,20 @@ class MemoryTracer:
         self.op_memory = defaultdict(int)
         self.phase_memory = defaultdict(int)
         self.current_phase = "initialization"
+        
+        # 初始化插件列表
+        self.plugins = []
+        self.register_default_plugins()
+    
+    def register_default_plugins(self):
+        """Register the default set of plugins."""
+        self.register_plugin(DistributedPlugin())
+        self.register_plugin(TransformerEnginePlugin())
+    
+    def register_plugin(self, plugin):
+        """Register a plugin with the tracer."""
+        plugin.setup(self)
+        self.plugins.append(plugin)
 
     def create_fake_tensor_from_tensor(self, tensor, device=None):
         """
@@ -289,217 +537,22 @@ class MemoryTracer:
 
     def __enter__(self):
         """Enter the context manager, enabling both fake tensors and memory estimation."""
-        # Patch torch.distributed functions to handle fake tensors
-        if hasattr(torch, 'distributed') and torch.distributed.is_available():
-            # Import FakeTensor for proper type checking
-            from torch._subclasses.fake_tensor import FakeTensor
-            
-            original_funcs = {}
-            
-            # Get all distributed functions that might need patching
-            dist_functions = [name for name in dir(torch.distributed) 
-                             if callable(getattr(torch.distributed, name)) 
-                             and not name.startswith('_')]
-            
-            # Create patches for each distributed function
-            for func_name in dist_functions:
-                original_func = getattr(torch.distributed, func_name)
-                original_funcs[func_name] = original_func
-                
-                # Define the patched function
-                def make_patched_dist_func(orig_func):
-                    @functools.wraps(orig_func)
-                    def patched_dist_func(*args, **kwargs):
-                        # Check if any of the arguments are fake tensors
-                        has_fake_tensor = any(
-                            isinstance(arg, FakeTensor)
-                            for arg in args
-                            if isinstance(arg, torch.Tensor)
-                        )
-                        
-                        # Also check in kwargs
-                        has_fake_tensor = has_fake_tensor or any(
-                            isinstance(arg, FakeTensor)
-                            for arg in kwargs.values()
-                            if isinstance(arg, torch.Tensor)
-                        )
-                        
-                        if has_fake_tensor:
-                            # TODO: returned tensor shape should be based on function type
-                            # If there are fake tensors, return copies of input tensors
-                            if len(args) > 0 and isinstance(args[0], torch.Tensor):
-                                output = args[0].clone()
-                                output.wait = lambda: None
-                                return output
-                            # Check if there's a tensor in kwargs to return
-                            for arg in kwargs.values():
-                                if isinstance(arg, torch.Tensor):
-                                    return arg.clone()
-                            # If no tensor found, just return None
-                            return None
-                        
-                        # Otherwise, call the original function
-                        return orig_func(*args, **kwargs)
-                    
-                    return patched_dist_func
-                
-                # Set the patched function
-                setattr(torch.distributed, func_name, make_patched_dist_func(original_func))
-            
-            # Store original functions to restore them on exit
-            self._original_dist_funcs = original_funcs
+        # 调用所有插件的enter方法
+        for plugin in self.plugins:
+            plugin.enter()
         
-        # Patch transformer_engine operations to handle fake tensors
-        try:
-            import transformer_engine
-            import transformer_engine.pytorch.ops as te_ops
-            from torch._subclasses.fake_tensor import FakeTensor
-            
-            # Store original functions for later restoration
-            self._original_te_funcs = {}
-            
-            # Patch forward methods on transformer_engine module ops
-            for op_name in dir(te_ops):
-                op_obj = getattr(te_ops, op_name)
-                if hasattr(op_obj, 'forward') and callable(getattr(op_obj, 'forward')):
-                    try:
-                        orig_forward = getattr(op_obj, 'forward')
-                        self._original_te_funcs[f"{op_name}.forward"] = orig_forward
-                        
-                        # Create patched forward method
-                        def make_patched_te_forward(orig_func, op_name):
-                            @functools.wraps(orig_func)
-                            def patched_forward(self, *args, **kwargs):
-                                # Check if any argument is a fake tensor
-                                has_fake = any(
-                                    isinstance(arg, FakeTensor)
-                                    for arg in args
-                                    if isinstance(arg, torch.Tensor)
-                                )
-                                
-                                has_fake = has_fake or any(
-                                    isinstance(arg, FakeTensor)
-                                    for arg in kwargs.values()
-                                    if isinstance(arg, torch.Tensor)
-                                )
-                                
-                                if has_fake:
-                                    print_rank_0(f"Handling fake tensor in {op_name}")
-                                    # For LayerNorm, return input with same shape 
-                                    if "LayerNorm" in op_name:
-                                        if len(args) > 0 and isinstance(args[0], torch.Tensor):
-                                            return args[0].clone()
-                                    
-                                    # For other operations, try to determine output shape
-                                    # based on operation type and input shapes
-                                    for arg in args:
-                                        if isinstance(arg, torch.Tensor):
-                                            return arg.clone()
-                                    
-                                    # Fallback
-                                    for arg in kwargs.values():
-                                        if isinstance(arg, torch.Tensor):
-                                            return arg.clone()
-                                    
-                                    return None
-                                
-                                return orig_func(self, *args, **kwargs)
-                            
-                            return patched_forward
-                        
-                        # Apply the patch
-                        setattr(op_obj, 'forward', make_patched_te_forward(orig_forward, op_name))
-                    except Exception as e:
-                        print_rank_0(f"Failed to patch {op_name}: {e}")
-                
-            # Patch specific problematic functions in transformer_engine
-            if hasattr(transformer_engine.pytorch.ops.basic.layer_norm, 'layernorm_fwd'):
-                orig_layernorm_fwd = transformer_engine.pytorch.ops.basic.layer_norm.layernorm_fwd
-                self._original_te_funcs["layernorm_fwd"] = orig_layernorm_fwd
-                
-                def patched_layernorm_fwd(*args, **kwargs):
-                    # Check for fake tensors
-                    has_fake = any(
-                        isinstance(arg, FakeTensor)
-                        for arg in args
-                        if isinstance(arg, torch.Tensor)
-                    )
-                    
-                    has_fake = has_fake or any(
-                        isinstance(arg, FakeTensor)
-                        for arg in kwargs.values()
-                        if isinstance(arg, torch.Tensor)
-                    )
-                    
-                    if has_fake:
-                        print_rank_0("Handling fake tensor in layernorm_fwd")
-                        # Get input tensor
-                        input_tensor = None
-                        for arg in args:
-                            if isinstance(arg, torch.Tensor):
-                                input_tensor = arg
-                                break
-                        
-                        if input_tensor is not None:
-                            # Create fake output and stats tensors
-                            output = input_tensor.clone()
-                            # Create fake mean and rstdev tensors with appropriate shapes
-                            if len(input_tensor.shape) > 1:
-                                reduced_shape = list(input_tensor.shape[:-1]) + [1]
-                                means = torch.zeros(reduced_shape, 
-                                                  dtype=input_tensor.dtype, 
-                                                  device=input_tensor.device)
-                                rstdevs = torch.ones(reduced_shape, 
-                                                   dtype=input_tensor.dtype, 
-                                                   device=input_tensor.device)
-                            else:
-                                means = torch.zeros(1, dtype=input_tensor.dtype, device=input_tensor.device)
-                                rstdevs = torch.ones(1, dtype=input_tensor.dtype, device=input_tensor.device)
-                            
-                            return output, means, rstdevs
-                        
-                        return None, None, None
-                    
-                    return orig_layernorm_fwd(*args, **kwargs)
-                
-                transformer_engine.pytorch.ops.basic.layer_norm.layernorm_fwd = patched_layernorm_fwd
-            
-        except ImportError:
-            print_rank_0("transformer_engine not found, skipping patching")
-        except Exception as e:
-            print_rank_0(f"Error patching transformer_engine: {e}")
-        
+        # 启用fake tensor mode和memory dispatch mode
         self.fake_mode.__enter__()
         self.memory_dispatch_mode.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exit the context manager, disabling both fake tensors and memory estimation."""
-        # Restore original distributed functions
-        if hasattr(self, '_original_dist_funcs'):
-            for func_name, orig_func in self._original_dist_funcs.items():
-                setattr(torch.distributed, func_name, orig_func)
+        # 调用所有插件的exit方法
+        for plugin in self.plugins:
+            plugin.exit(exc_type, exc_val, exc_tb)
         
-        # Restore original transformer_engine functions
-        if hasattr(self, '_original_te_funcs'):
-            try:
-                import transformer_engine
-                import transformer_engine.pytorch.ops as te_ops
-                
-                # Restore each patched function
-                for func_path, orig_func in self._original_te_funcs.items():
-                    if "." in func_path:
-                        module_name, func_name = func_path.split(".")
-                        if hasattr(te_ops, module_name):
-                            module = getattr(te_ops, module_name)
-                            setattr(module, func_name, orig_func)
-                    elif func_path == "layernorm_fwd":
-                        transformer_engine.pytorch.ops.basic.layer_norm.layernorm_fwd = orig_func
-            except ImportError:
-                pass
-            except Exception as e:
-                print_rank_0(f"Error restoring transformer_engine functions: {e}")
-        
+        # 退出memory dispatch mode和fake tensor mode
         self.memory_dispatch_mode.__exit__(exc_type, exc_val, exc_tb)
         return self.fake_mode.__exit__(exc_type, exc_val, exc_tb)
 
