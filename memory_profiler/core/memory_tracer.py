@@ -3,7 +3,8 @@ import contextlib
 from collections import defaultdict
 
 from .memory_dispatch_mode import MemoryDispatchMode
-from ..plugins import DistributedPlugin, TransformerEnginePlugin
+from ..plugins import DistributedPlugin, TransformerEnginePlugin, P2PCommunicationPlugin
+
 
 class MemoryTracer:
     """
@@ -32,16 +33,16 @@ class MemoryTracer:
         self.op_memory = defaultdict(int)
         self.phase_memory = defaultdict(int)
         self.current_phase = "initialization"
-        
-        # 初始化插件列表
+
         self.plugins = []
         self.register_default_plugins()
-    
+
     def register_default_plugins(self):
         """Register the default set of plugins."""
         self.register_plugin(DistributedPlugin())
         self.register_plugin(TransformerEnginePlugin())
-    
+        self.register_plugin(P2PCommunicationPlugin())
+
     def register_plugin(self, plugin):
         """Register a plugin with the tracer."""
         plugin.setup(self)
@@ -70,7 +71,9 @@ class MemoryTracer:
             )
         return fake_tensor
 
-    def create_fake_tensor(self, *shape, dtype=torch.float16, device=None):
+    def create_fake_tensor(
+        self, *shape, dtype=torch.float16, device=None, requires_grad=False
+    ):
         """
         Create a fake batch of input data.
 
@@ -86,27 +89,25 @@ class MemoryTracer:
             device = self.device
 
         with self.fake_mode:
-            fake_input = torch.empty(shape, dtype=dtype, device=device)
+            fake_input = torch.empty(
+                shape, dtype=dtype, device=device, requires_grad=requires_grad
+            )
         return fake_input
 
     def __enter__(self):
         """Enter the context manager, enabling both fake tensors and memory estimation."""
-        # 调用所有插件的enter方法
         for plugin in self.plugins:
             plugin.enter()
-        
-        # 启用fake tensor mode和memory dispatch mode
+
         self.fake_mode.__enter__()
         self.memory_dispatch_mode.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exit the context manager, disabling both fake tensors and memory estimation."""
-        # 调用所有插件的exit方法
         for plugin in self.plugins:
             plugin.exit(exc_type, exc_val, exc_tb)
-        
-        # 退出memory dispatch mode和fake tensor mode
+
         self.memory_dispatch_mode.__exit__(exc_type, exc_val, exc_tb)
         return self.fake_mode.__exit__(exc_type, exc_val, exc_tb)
 
@@ -119,17 +120,24 @@ class MemoryTracer:
         # Convert device_id from numeric keys (0, 1, etc.) to string keys ('cuda:0', 'cuda:1', etc.)
         # to ensure consistent access and avoid KeyError
         current_memory = {}
-        for device_id, memory in self.memory_dispatch_mode.current_memory_per_device.items():
-            if isinstance(device_id, int) or (isinstance(device_id, str) and device_id.isdigit()):
+        for (
+            device_id,
+            memory,
+        ) in self.memory_dispatch_mode.current_memory_per_device.items():
+            if isinstance(device_id, int) or (
+                isinstance(device_id, str) and device_id.isdigit()
+            ):
                 device_key = f"cuda:{device_id}"
             else:
                 device_key = device_id
             current_memory[device_key] = memory
-            
+
         # Also add a fallback numeric index access for backward compatibility
-        for i, (device_id, memory) in enumerate(self.memory_dispatch_mode.current_memory_per_device.items()):
+        for i, (device_id, memory) in enumerate(
+            self.memory_dispatch_mode.current_memory_per_device.items()
+        ):
             current_memory[i] = memory
-            
+
         return current_memory
 
     @contextlib.contextmanager
@@ -218,4 +226,4 @@ class MemoryTracer:
                 print(f"    Tensor count: {info['count']}")
                 print(f"    Total size: {info['total_size_mb']}")
                 if detailed:
-                    print(f"    Tensor shapes: {info['shapes']}") 
+                    print(f"    Tensor shapes: {info['shapes']}")
