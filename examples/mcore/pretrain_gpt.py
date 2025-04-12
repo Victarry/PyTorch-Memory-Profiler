@@ -17,6 +17,7 @@ from megatron.core.datasets.blended_megatron_dataset_builder import (
 from megatron.core.datasets.gpt_dataset import GPTDatasetConfig, MockGPTDataset
 from megatron.training.tokenizer.tokenizer import _NullTokenizer
 import argparse
+from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from memory_profiler import MemoryTracer
 
@@ -24,20 +25,34 @@ _SEQUENCE_LENGTH = 64
 
 
 def initialize_distributed(
-    tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+    tensor_model_parallel_size=1,
+    pipeline_model_parallel_size=1,
+    fake=False,
+    create_gloo_process_groups=True,
 ):
     parallel_state.destroy_model_parallel()
 
-    # Torch setup for distributed training
     rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
+    # Torch setup for distributed training
     torch.cuda.set_device(rank)
-    torch.distributed.init_process_group(world_size=world_size, rank=rank)
+    if fake:
+        fake_store = FakeStore()
+        torch.distributed.init_process_group(
+            backend="fake", world_size=world_size, rank=rank, store=fake_store
+        )
+    else:
+        torch.distributed.init_process_group(
+            backend="nccl", world_size=world_size, rank=rank
+        )
 
     # Megatron core distributed training initialization
     parallel_state.initialize_model_parallel(
-        tensor_model_parallel_size, pipeline_model_parallel_size
+        tensor_model_parallel_size,
+        pipeline_model_parallel_size,
+        create_gloo_process_groups=create_gloo_process_groups,
     )
+
 
 class MemoryRecorder:
     def __init__(self):
@@ -45,7 +60,7 @@ class MemoryRecorder:
 
     def record_memory_allocated(self, message):
         self.memory_allocated = message
-    
+
     def log():
         pass
 
@@ -111,7 +126,8 @@ def print_rank0(message):
 
 def silicon_main(args):
     initialize_distributed(
-        tensor_model_parallel_size=args.tp_size, pipeline_model_parallel_size=args.pp_size
+        tensor_model_parallel_size=args.tp_size,
+        pipeline_model_parallel_size=args.pp_size,
     )
     model_parallel_cuda_manual_seed(123)
 
@@ -183,12 +199,15 @@ def estimated_main(args):
     estimator = MemoryTracer(device=device)
     torch.set_default_device(device)
 
-    train_iterator = get_train_data_iterator(args.mbs)
     # Initialize distributed setup
     initialize_distributed(
-        tensor_model_parallel_size=args.tp_size, pipeline_model_parallel_size=args.pp_size
+        tensor_model_parallel_size=args.tp_size,
+        pipeline_model_parallel_size=args.pp_size,
+        fake=True,
+        create_gloo_process_groups=False,
     )
     model_parallel_cuda_manual_seed(123)
+    train_iterator = get_train_data_iterator(args.mbs)
 
     with estimator:
 
