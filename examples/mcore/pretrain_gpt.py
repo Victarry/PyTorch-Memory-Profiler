@@ -54,24 +54,29 @@ def model_provider():
     """Build the model."""
 
     transformer_config = TransformerConfig(
-        num_layers=16,
+        num_layers=2,
         hidden_size=4096,
         num_attention_heads=16,
         use_cpu_initialization=True,
         pipeline_dtype=torch.float32,
     )
 
+    pre_process = parallel_state.is_pipeline_first_stage()
+    post_process = parallel_state.is_pipeline_last_stage()
+
     gpt_model = GPTModel(
         config=transformer_config,
         transformer_layer_spec=get_gpt_layer_local_spec(normalization="RMSNorm"),
         vocab_size=128,
         max_sequence_length=_SEQUENCE_LENGTH,
+        pre_process=pre_process,
+        post_process=post_process,
     )
 
     return gpt_model
 
 
-def get_train_data_iterator():
+def get_train_data_iterator(batch_size):
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         if torch.distributed.get_rank() == 0:
             compile_helpers()
@@ -92,7 +97,7 @@ def get_train_data_iterator():
         MockGPTDataset, [1000, None, None], lambda: True, config
     ).build()
 
-    train_dataloader = DataLoader(datasets[0], batch_size=8, shuffle=True)
+    train_dataloader = DataLoader(datasets[0], batch_size=batch_size, shuffle=True)
 
     train_iterator = iter(train_dataloader)
 
@@ -141,7 +146,7 @@ def silicon_main(args):
 
     optim = Adam(gpt_model.parameters())
 
-    train_iterator = get_train_data_iterator()
+    train_iterator = get_train_data_iterator(args.mbs)
 
     forward_backward_func = get_forward_backward_func()
 
@@ -178,7 +183,7 @@ def estimated_main(args):
     estimator = MemoryTracer(device=device)
     torch.set_default_device(device)
 
-    train_iterator = get_train_data_iterator()
+    train_iterator = get_train_data_iterator(args.mbs)
     # Initialize distributed setup
     initialize_distributed(
         tensor_model_parallel_size=args.tp_size, pipeline_model_parallel_size=args.pp_size

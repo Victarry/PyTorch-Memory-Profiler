@@ -157,19 +157,17 @@ class P2PCommunicationPlugin(TracerPlugin):
             # Import needed module inside the function
             import megatron.core as core
 
-            # Always use fake tensors
-            if tensor_shape is not None:
+            if core.parallel_state.is_pipeline_last_stage():
+                return None
+            else:
                 config_dtype = (
                     getattr(config, "pipeline_dtype", torch.float32)
                     if config
                     else torch.float32
                 )
-                # Only create output tensor grad if not in pipeline last stage
-                if not core.parallel_state.is_pipeline_last_stage():
-                    return self.tracer.create_fake_tensor(
-                        *tensor_shape, dtype=config_dtype, requires_grad=True
-                    )
-            return None
+                return self.tracer.create_fake_tensor(
+                    *tensor_shape, dtype=config_dtype, requires_grad=True
+                )
 
         return patched_func
 
