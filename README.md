@@ -135,6 +135,13 @@ Plugins are enabled by default when initializing `MemoryTracer`. If `megatron-co
 
 By combining these mechanisms, the library simulates the computation graph's execution flow and tracks the estimated memory allocation changes without needing to allocate the full memory or perform actual computations/communication.
 
+## TODO
+[ ] Check the memory diff for optimizer
+[ ] Support for TE
+[ ] Integration to training loop of Megatron-LM
+[ ] Update the logging system for better usebility
+[ ] Build a GUI or visualization system.
+
 ## Known Limitations & Considerations
 
 *   **Estimation Accuracy:** The accuracy depends on PyTorch correctly reporting storage sizes for fake tensors and the dispatcher accurately reflecting real-world operations. Complex custom CUDA kernels might not be perfectly captured.

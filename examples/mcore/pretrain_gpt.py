@@ -24,7 +24,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from memory_profiler import MemoryTracer
 
-_SEQUENCE_LENGTH = 64
+_SEQUENCE_LENGTH = 4096
 
 
 def initialize_distributed(
@@ -96,11 +96,6 @@ def get_train_data_iterator(batch_size):
     return train_iterator
 
 
-def print_rank0(message):
-    if torch.distributed.get_rank() == 0:
-        print(message)
-
-
 def silicon_main(args, model_provider_func):
     initialize_distributed(
         tensor_model_parallel_size=args.tp_size,
@@ -146,14 +141,16 @@ def silicon_main(args, model_provider_func):
     for iteration in range(1):
         optim.zero_grad()
 
-        print_rank0(
-            f"actual current_memory_allocated before forward: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB"
-        )
-        print_rank0(
-            f"actual max_memory_allocated before forward: {torch.cuda.max_memory_allocated() / (1024 ** 2):.2f} MB"
-        )
+        rank = torch.distributed.get_rank()
+        if rank == 0:
+            print(
+                f"rank {rank} actual current_memory_allocated before forward: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB"
+            )
+            print(
+                f"rank {rank} actual max_memory_allocated before forward: {torch.cuda.max_memory_allocated() / (1024 ** 2):.2f} MB"
+            )
 
-        losses_reduced = forward_backward_func(
+        forward_backward_func(
             forward_step_func=forward_step_func,
             data_iterator=train_iterator,
             model=gpt_model,
@@ -163,19 +160,20 @@ def silicon_main(args, model_provider_func):
             decoder_seq_length=_SEQUENCE_LENGTH,
             forward_only=False,
         )
-        print_rank0(
-            f"actual current_memory_allocated after forward-backward pass: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB"
-        )
-        print_rank0(
-            f"actual max_memory_allocated after forward-backward pass: {torch.cuda.max_memory_allocated() / (1024 ** 2):.2f} MB"
-        )
-        optim.step()
-        print_rank0(
-            f"actual current_memory_allocated after optimizer step: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB"
-        )
-        print_rank0(
-            f"actual max_memory_allocated after optimizer step: {torch.cuda.max_memory_allocated() / (1024 ** 2):.2f} MB"
-        )
+        if rank == 0:
+            print(
+                f"rank {rank} actual current_memory_allocated after forward-backward pass: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB"
+            )
+            print(
+                f"rank {rank} actual max_memory_allocated after forward-backward pass: {torch.cuda.max_memory_allocated() / (1024 ** 2):.2f} MB"
+            )
+            optim.step()
+            print(
+                f"rank {rank} actual current_memory_allocated after optimizer step: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB"
+            )
+            print(
+                f"rank {rank} actual max_memory_allocated after optimizer step: {torch.cuda.max_memory_allocated() / (1024 ** 2):.2f} MB"
+            )
 
 
 def estimated_main(args, model_provider_func):
@@ -351,9 +349,13 @@ def moe_model_provider(use_te=False):
     post_process = parallel_state.is_pipeline_last_stage()
 
     if use_te:
-        layer_spec = get_gpt_layer_with_transformer_engine_spec(num_experts=8, moe_grouped_gemm=True)
+        layer_spec = get_gpt_layer_with_transformer_engine_spec(
+            num_experts=8, moe_grouped_gemm=True
+        )
     else:
-        layer_spec = get_gpt_layer_local_spec(num_experts=8, moe_grouped_gemm=False, normalization="RMSNorm")
+        layer_spec = get_gpt_layer_local_spec(
+            num_experts=8, moe_grouped_gemm=False, normalization="RMSNorm"
+        )
     return GPTModel(
         config=config,
         transformer_layer_spec=layer_spec,
@@ -367,9 +369,9 @@ def moe_model_provider(use_te=False):
 if __name__ == "__main__":
     args = parse_args()
     if args.model == "gpt":
-        model_provider_func = gpt_model_provider
+        model_provider_func = partial(gpt_model_provider, use_te=args.use_te)
     elif args.model == "moe":
-        model_provider_func = moe_model_provider
+        model_provider_func = partial(moe_model_provider, use_te=args.use_te)
     else:
         raise ValueError(f"Invalid model: {args.model}")
 
