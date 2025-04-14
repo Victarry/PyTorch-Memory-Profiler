@@ -113,7 +113,10 @@ class MemoryTracer:
 
     def get_max_memory_allocated(self):
         """Get the maximum memory allocated during the context manager."""
-        return self.memory_dispatch_mode.peak_memory_per_device
+        max_memory_mb = {}
+        for device_id, memory_bytes in self.memory_dispatch_mode.peak_memory_per_device.items():
+            max_memory_mb[device_id] = memory_bytes / (1024 * 1024)  # Convert bytes to MB
+        return max_memory_mb
 
     def get_current_memory_allocated(self):
         """Get the current memory allocated during the context manager."""
@@ -124,21 +127,12 @@ class MemoryTracer:
             device_id,
             memory,
         ) in self.memory_dispatch_mode.current_memory_per_device.items():
-            if isinstance(device_id, int) or (
-                isinstance(device_id, str) and device_id.isdigit()
-            ):
-                device_key = f"cuda:{device_id}"
-            else:
-                device_key = device_id
-            current_memory[device_key] = memory
+            current_memory[device_id] = memory
 
-        # Also add a fallback numeric index access for backward compatibility
-        for i, (device_id, memory) in enumerate(
-            self.memory_dispatch_mode.current_memory_per_device.items()
-        ):
-            current_memory[i] = memory
-
-        return current_memory
+        current_memory_mb = {}
+        for device_id, memory_bytes in current_memory.items():
+            current_memory_mb[device_id] = memory_bytes / (1024 * 1024)  # Convert bytes to MB
+        return current_memory_mb
 
     @contextlib.contextmanager
     def track_phase(self, phase_name):

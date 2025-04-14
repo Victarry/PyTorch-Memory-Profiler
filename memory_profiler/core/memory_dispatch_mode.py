@@ -64,16 +64,24 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         tree_map_only(
             torch.Tensor, lambda t: self.track_tensor_memory(t, current_module), outputs
         )
-
-        return outputs
+        if isinstance(outputs, torch.Tensor):
+            return outputs.to('cuda')
+        elif isinstance(outputs, tuple):
+            outputs_cuda = []
+            for output in outputs:
+                if isinstance(output, torch.Tensor):
+                    outputs_cuda.append(output.to('cuda'))
+                else:
+                    outputs_cuda.append(output)
+            return tuple(outputs_cuda)
+        else:
+            return outputs
 
     def track_tensor_memory(self, tensor, module_path):
         if tensor.untyped_storage() in self.live_tensors:
             return
 
-        device_id = tensor.device.index
-        if device_id is None:
-            device_id = "cpu"
+        device_id = tensor.device
 
         # Calculate memory usage
         nbytes = tensor.untyped_storage().nbytes()

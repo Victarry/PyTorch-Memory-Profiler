@@ -136,11 +136,10 @@ Plugins are enabled by default when initializing `MemoryTracer`. If `megatron-co
 By combining these mechanisms, the library simulates the computation graph's execution flow and tracks the estimated memory allocation changes without needing to allocate the full memory or perform actual computations/communication.
 
 ## TODO
-[ ] Check the memory diff for optimizer
-[ ] Support for TE
-[ ] Integration to training loop of Megatron-LM
-[ ] Update the logging system for better usebility
-[ ] Build a GUI or visualization system.
+- [x] Integration to training loop of Megatron-LM
+- [ ] Support for TE and fused kernel in MCore
+- [ ] Update the logging system for better usability
+- [ ] Build a GUI or visualization system
 
 ## Known Limitations & Considerations
 
