@@ -3,7 +3,12 @@ import contextlib
 from collections import defaultdict
 
 from .memory_dispatch_mode import MemoryDispatchMode
-from ..plugins import DistributedPlugin, TransformerEnginePlugin, P2PCommunicationPlugin
+from ..plugins import (
+    DistributedPlugin,
+    TransformerEnginePlugin,
+    P2PCommunicationPlugin,
+    MegatronCorePlugin,
+)
 
 
 class MemoryTracer:
@@ -42,6 +47,7 @@ class MemoryTracer:
         self.register_plugin(DistributedPlugin())
         self.register_plugin(TransformerEnginePlugin())
         self.register_plugin(P2PCommunicationPlugin())
+        self.register_plugin(MegatronCorePlugin())
 
     def register_plugin(self, plugin):
         """Register a plugin with the tracer."""
@@ -114,8 +120,13 @@ class MemoryTracer:
     def get_max_memory_allocated(self):
         """Get the maximum memory allocated during the context manager."""
         max_memory_mb = {}
-        for device_id, memory_bytes in self.memory_dispatch_mode.peak_memory_per_device.items():
-            max_memory_mb[device_id] = memory_bytes / (1024 * 1024)  # Convert bytes to MB
+        for (
+            device_id,
+            memory_bytes,
+        ) in self.memory_dispatch_mode.peak_memory_per_device.items():
+            max_memory_mb[device_id] = memory_bytes / (
+                1024 * 1024
+            )  # Convert bytes to MB
         return max_memory_mb
 
     def get_current_memory_allocated(self):
@@ -131,7 +142,9 @@ class MemoryTracer:
 
         current_memory_mb = {}
         for device_id, memory_bytes in current_memory.items():
-            current_memory_mb[device_id] = memory_bytes / (1024 * 1024)  # Convert bytes to MB
+            current_memory_mb[device_id] = memory_bytes / (
+                1024 * 1024
+            )  # Convert bytes to MB
         return current_memory_mb
 
     @contextlib.contextmanager
