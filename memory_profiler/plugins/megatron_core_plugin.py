@@ -45,12 +45,14 @@ def apply_megatron_core_patch():
     2. Multi-tensor implementations (forcing local implementation)
     3. Adam optimizer (replacing with AdamW)
     4. Replacing _coalescing_manager with nullcontext to fix related errors
+    5. Modifying timer log function to avoid all-reduce operations
     """
     # Apply all patches
     patch_distributed_functions()
     patch_multi_tensor_functions()
     patch_adam_optimizer()
     patch_coalescing_manager()
+    patch_timer_log_function()
 
     logger.info("All Megatron-LM core patches have been applied.")
 
@@ -182,23 +184,33 @@ def patch_adam_optimizer():
     instead of the default Adam implementation.
     """
     try:
-        # Import the distrib_optimizer module
+        # Import the distrib_optimizer module and patch Adam
+        optimizer_module = importlib.import_module(
+            "megatron.core.optimizer"
+        )
+        if hasattr(optimizer_module, "Adam"):
+            setattr(optimizer_module, "Adam", torch.optim.AdamW)
+            logger.info(
+                "Successfully patched Adam to use torch.optim.AdamW in megatron.core.optimizer.optimizer.__init__"
+            )
+        else:
+            logger.warning("megatron.core.optimizer.Adam not found. Skipping Adam patch.")
+
+        # Import the distrib_optimizer module and patch Adam
         distrib_optimizer_module = importlib.import_module(
             "megatron.core.optimizer.distrib_optimizer"
         )
-
-        # Force set AdamW
-        if hasattr(torch.optim, "AdamW"):
+        if hasattr(distrib_optimizer_module, "Adam"):
             setattr(distrib_optimizer_module, "Adam", torch.optim.AdamW)
             logger.info(
                 "Successfully patched Adam to use torch.optim.AdamW in megatron.core.optimizer.distrib_optimizer"
             )
         else:
-            logger.warning("torch.optim.AdamW not found. Skipping Adam patch.")
+            logger.warning("megatron.core.optimizer.distrib_optimizer.Adam not found. Skipping Adam patch.")
 
-    except ImportError:
+    except ImportError as e:
         logger.warning(
-            "Module megatron.core.optimizer.distrib_optimizer not found. Skipping Adam patch."
+            f"Module megatron.core.optimizer.distrib_optimizer not found. Skipping Adam patch. {e}"
         )
     except Exception as e:
         logger.error(f"Error patching Adam optimizer: {e}", exc_info=True)
@@ -292,6 +304,80 @@ def patch_coalescing_manager():
 
     except Exception as e:
         logger.error(f"Error in patch_coalescing_manager: {e}", exc_info=True)
+
+
+def patch_timer_log_function():
+    """
+    Patches the Megatron-LM Timers.log function to only show current rank's time
+    and avoid all-reduce operations that can cause hangs or errors during profiling.
+    """
+    try:
+        # Import the timers module
+        timers_module = importlib.import_module("megatron.core.timers")
+        
+        # Original function to reference (keep for documentation but don't use)
+        original_log = timers_module.Timers.log
+        
+        # Define a new log function that only shows current rank's timings
+        def patched_log(self, names, rank=None, normalizer=1.0, reset=True, barrier=False):
+            """
+            Patched version of log function that only shows the current rank's timing data
+            without doing all-gather operations.
+            """
+            # Get current rank
+            local_rank = torch.distributed.get_rank()
+            
+            # Skip everything if not on the rank to log to
+            if rank is not None and rank != local_rank:
+                return
+                
+            # If no input rank is provided, log on last rank
+            if rank is None:
+                rank = torch.distributed.get_world_size() - 1
+                if rank != local_rank:
+                    return
+            
+            # Collect timing data only for this rank - no all-gather/all-reduce
+            output_string = f"Rank {local_rank} timing data (ms):"
+            for name in names:
+                if name in self._timers:
+                    timer = self._timers[name]
+                    elapsed_time = timer.elapsed(reset=reset) * 1000.0 / normalizer
+                    output_string += f"\n  {(name + ' ').ljust(48, '.')}: {elapsed_time:.2f}"
+                    
+            # Print the output
+            print(output_string, flush=True)
+        
+        # Replace the log function
+        setattr(timers_module.Timers, "log", patched_log)
+        logger.info("Successfully patched Timers.log function to avoid all-reduce operations")
+        
+        # Also patch write method to avoid distributed operations
+        def patched_write(self, names, writer, iteration, normalizer=1.0, reset=True, barrier=False):
+            """
+            Patched version of write function that only logs current rank's timing data
+            to tensorboard, avoiding all-gather operations.
+            """
+            # Skip if no writer
+            if writer is None:
+                return
+                
+            # Get current rank data only
+            for name in names:
+                if name in self._timers:
+                    timer = self._timers[name]
+                    elapsed_time = timer.elapsed(reset=reset) * 1000.0 / normalizer
+                    writer.add_scalar(f"{torch.distributed.get_rank()}-{name}-time", 
+                                      elapsed_time, iteration)
+        
+        # Replace the write function
+        setattr(timers_module.Timers, "write", patched_write)
+        logger.info("Successfully patched Timers.write function to avoid all-reduce operations")
+        
+    except ImportError:
+        logger.warning("Module megatron.core.timers not found. Skipping timer log patch.")
+    except Exception as e:
+        logger.error(f"Error patching timer log function: {e}", exc_info=True)
 
 
 # To use this plugin, import it and call apply_megatron_core_patch
