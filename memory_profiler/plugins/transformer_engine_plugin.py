@@ -55,7 +55,7 @@ class TransformerEnginePlugin(TracerPlugin):
                     if func_name == "layernorm_fwd":
                         return output, means, rstdevs
                     else: # rmsnorm_fwd
-                        return output, rstdevs
+                        return output, None, rstdevs
 
                 elif func_name == "layernorm_bwd":
                     # Args typically: grad_output, input, mu, rsigma, ln_weight, ...
