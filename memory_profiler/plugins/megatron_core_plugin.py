@@ -63,18 +63,18 @@ def patch_distributed_functions():
     distributed communication functions (_all_gather_base, _reduce_scatter_base),
     regardless of the torch version check results in the original code.
     """
-    if not hasattr(torch.distributed, "_all_gather_base") or not hasattr(
-        torch.distributed, "_reduce_scatter_base"
+    if not hasattr(torch.distributed, "all_gather_into_tensor") or not hasattr(
+        torch.distributed, "reduce_scatter_tensor"
     ):
         logger.warning(
-            "torch.distributed._all_gather_base or "
-            "torch.distributed._reduce_scatter_base not found. "
+            "torch.distributed.all_gather_into_tensor or "
+            "torch.distributed.reduce_scatter_tensor not found. "
             "Skipping Megatron-LM core distributed function patch."
         )
         return
 
-    all_gather_func = torch.distributed._all_gather_base
-    reduce_scatter_func = torch.distributed._reduce_scatter_base
+    all_gather_func = torch.distributed.all_gather_into_tensor
+    reduce_scatter_func = torch.distributed.reduce_scatter_tensor
 
     patched_something = False
     for module_name in target_modules:

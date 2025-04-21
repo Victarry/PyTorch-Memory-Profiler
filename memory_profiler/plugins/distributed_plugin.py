@@ -54,6 +54,12 @@ class DistributedPlugin(TracerPlugin):
             "_reduce_scatter_base",
             "_all_gather_base",
         ]
+        
+        # Define a dummy class that supports attribute assignment
+        class DummyDistributedOutput:
+            def wait(self):
+                pass
+                
         # Create patches for each distributed function
         for func_name in dist_functions:
             original_func = getattr(torch.distributed, func_name)
@@ -63,16 +69,8 @@ class DistributedPlugin(TracerPlugin):
             def make_patched_dist_func(orig_func):
                 @functools.wraps(orig_func)
                 def patched_dist_func(*args, **kwargs):
-                    # If there are fake tensors, return copies of input tensors
-                    if len(args) > 0 and isinstance(args[0], torch.Tensor):
-                        output = args[0].clone()
-                        output.wait = lambda: None
-                        return output
-                    # Check if there's a tensor in kwargs to return
-                    for arg in kwargs.values():
-                        if isinstance(arg, torch.Tensor):
-                            return arg.clone()
-                    return None
+                    # print(f"Calling {orig_func.__name__} with args: {args} and kwargs: {kwargs}")
+                    return DummyDistributedOutput()
 
                 return patched_dist_func
             print(f"Setting {func_name} to patched function")
