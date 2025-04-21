@@ -4,6 +4,7 @@ import weakref
 import functools
 import contextlib
 from collections import defaultdict
+import gc  # Import gc for potential debugging or advanced scenarios if needed later
 
 from ..utils import print_rank_0
 
@@ -11,11 +12,11 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
     def __init__(self):
         self.peak_memory_per_device = {}
         self.current_memory_per_device = {}
+        # Stores {storage: {'size': nbytes, 'shape': shape, 'module': module_path}}
         self.live_tensors = weakref.WeakKeyDictionary()
 
         self.module_stack = []
         self.module_memory_usage = defaultdict(lambda: defaultdict(int))
-        self.tensor_to_module = weakref.WeakKeyDictionary()
 
         self.phase_tensor_modules = defaultdict(list)
         self.current_phase = "initialization"
@@ -65,26 +66,28 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             torch.Tensor, lambda t: self.track_tensor_memory(t, current_module), outputs
         )
         if isinstance(outputs, torch.Tensor):
-            return outputs.to('cuda')
+            # Always move to cuda since modules.to("cuda") doesn't work for FakeTensor.
+            return outputs.to('cuda') 
         elif isinstance(outputs, tuple):
-            outputs_cuda = []
+            outputs_mod = []
             for output in outputs:
                 if isinstance(output, torch.Tensor):
-                    outputs_cuda.append(output.to('cuda'))
+                     outputs_mod.append(output.to('cuda'))
                 else:
-                    outputs_cuda.append(output)
-            return tuple(outputs_cuda)
+                    outputs_mod.append(output)
+            return tuple(outputs_mod)
         else:
             return outputs
 
     def track_tensor_memory(self, tensor, module_path):
-        if tensor.untyped_storage() in self.live_tensors:
+        storage = tensor.untyped_storage()
+        if storage in self.live_tensors:
             return
 
         device_id = tensor.device
 
         # Calculate memory usage
-        nbytes = tensor.untyped_storage().nbytes()
+        nbytes = storage.nbytes()
 
         # Update current device memory usage
         if device_id not in self.current_memory_per_device:
@@ -97,19 +100,23 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             self.current_memory_per_device[device_id],
         )
 
-        # Record which module created this tensor
-        self.tensor_to_module[tensor.untyped_storage()] = module_path
-
         # Update module memory usage statistics
         self.module_memory_usage[module_path][device_id] += nbytes
 
-        # Mark as tracked
-        self.live_tensors[tensor.untyped_storage()] = True
+        # Store tensor info keyed by storage
+        self.live_tensors[storage] = {
+            "size": nbytes,
+            "shape": tensor.shape,
+            "module": module_path,
+            "device": device_id, # Store device for release
+            "phase": self.current_phase # Store creation phase
+        }
 
-        # When the tensor is released, reduce the memory count
+        # When the storage is released, reduce the memory count
+        # Pass necessary info directly to the callback
         weakref.finalize(
-            tensor.untyped_storage(),
-            functools.partial(self.release_memory, device_id, nbytes, module_path),
+            storage,
+            functools.partial(self.release_memory, device_id, nbytes),
         )
         # Record which phase the tensor was created in, and which module it belongs to
         self.phase_tensor_modules[self.current_phase].append(
@@ -172,9 +179,11 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             return "Unknown"
         return self.module_stack[-1]
 
-    def release_memory(self, device_id, nbytes, module_path):
-        """Called when a tensor is released"""
-        self.current_memory_per_device[device_id] -= nbytes
+    def release_memory(self, device_id, nbytes):
+        """Called when a tensor's storage is garbage collected"""
+        if device_id in self.current_memory_per_device:
+             self.current_memory_per_device[device_id] -= nbytes
+        # Entry in self.live_tensors is removed automatically by WeakKeyDictionary
 
     def get_module_memory_report(self):
         """Generate a report of memory usage for each module"""
@@ -212,6 +221,68 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             }
 
         return report
+
+    def log_live_tensors(self, min_memory_mb=0):
+        """Logs a table of currently live tensors, sorted by size.
+
+        Args:
+            min_memory_mb (float): Minimum memory size (in MB) for a tensor to be included in the report.
+                                   Defaults to 0 (show all).
+        """
+        live_tensor_info = []
+        total_displayed_memory = 0
+        min_memory_bytes = min_memory_mb * (1024**2)
+
+        # Iterate through the WeakKeyDictionary safely
+        # .items() might be unsafe if collection happens during iteration
+        # Create a temporary list of items first
+        current_live_items = list(self.live_tensors.items())
+
+        for storage, info in current_live_items:
+            # Check if storage is still valid (though WeakKeyDict handles this mostly)
+            # This check might be redundant but adds safety
+            try:
+                # Attempt a cheap operation to check validity implicitly
+                _ = storage.nbytes() 
+                live_tensor_info.append({
+                    "size": info["size"],
+                    "shape": info["shape"],
+                    "module": info["module"],
+                    "phase": info["phase"] # Extract phase
+                })
+                total_displayed_memory += info["size"]
+            except RuntimeError: 
+                # Storage might have been invalidated between list creation and access
+                continue 
+
+        # Filter by minimum memory size
+        filtered_live_tensor_info = [
+            info for info in live_tensor_info if info["size"] >= min_memory_bytes
+        ]
+
+        # Sort by size descending
+        filtered_live_tensor_info.sort(key=lambda x: x["size"], reverse=True)
+
+        # Format and print the table
+        header = f"{'Module':<60} {'Phase':<20} {'Size (MB)':<15} {'Shape'}"
+        separator = "-" * (len(header) + 5) # Adjust width as needed
+
+        print_rank_0(f"\nLive Tensors Report (Minimum Size: {min_memory_mb} MB):")
+        print_rank_0(separator)
+        print_rank_0(header)
+        print_rank_0(separator)
+
+        for info in filtered_live_tensor_info:
+            module_str = ".".join(info['module'].split('.')[-5:])
+            phase_str = info['phase'][:18] + '..' if len(info['phase']) > 20 else info['phase']
+            size_mb = info['size'] / (1024**2)
+            shape_str = str(info['shape'])
+            print_rank_0(f"{phase_str:<20} {module_str:<80} {size_mb:<15.2f} {shape_str}")
+
+        print_rank_0(separator)
+        total_displayed_mb = total_displayed_memory / (1024**2)
+        print_rank_0(f"Total Displayed Live Tensor Memory: {total_displayed_mb:.2f} MB")
+        print_rank_0(separator + "\n")
 
     @contextlib.contextmanager
     def trace_module(self, name):
