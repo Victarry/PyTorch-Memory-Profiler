@@ -2,6 +2,7 @@ import torch
 import functools
 from .base_plugin import TracerPlugin
 from ..utils import print_rank_0
+import importlib
 
 class TransformerEnginePlugin(TracerPlugin):
     """Plugin for handling transformer_engine operations with fake tensors."""
@@ -10,7 +11,7 @@ class TransformerEnginePlugin(TracerPlugin):
         self.tracer = tracer
         self.original_te_funcs = {}
         self._tex_module = None # Store the tex module reference
-        self._gemm_module = None # Store the gemm module reference
+        self._pytorch_tex_module = None # Store the gemm module reference
     
     def _create_patched_norm_func(self, func_name, orig_func):
         """Creates a patched version of a normalization function to handle fake tensors."""
@@ -23,7 +24,6 @@ class TransformerEnginePlugin(TracerPlugin):
                        any(isinstance(v, FakeTensor) for v in kwargs.values() if isinstance(v, torch.Tensor))
 
             if has_fake:
-                print_rank_0(f"Handling fake tensor in {func_name}")
                 # Identify the main input tensor (usually the first tensor arg)
                 input_tensor = None
                 for arg in args:
@@ -114,6 +114,8 @@ class TransformerEnginePlugin(TracerPlugin):
             if has_fake:
                 # general_gemm returns: out, bias_grad, gelu_input, extra_output
                 # Return None placeholders for now as requested
+                A = torch.squeeze(A)
+                B = torch.squeeze(B)
                 if trans_A:
                     A = A.transpose(0, 1)
                 if trans_B:
@@ -134,11 +136,11 @@ class TransformerEnginePlugin(TracerPlugin):
             self._tex_module = tex # Store for restoration
             # Import gemm submodule
             try:
-                 import transformer_engine_torch as te_gemm
-                 self._gemm_module = te_gemm # Store for restoration
+                 import transformer_engine_torch as pytorch_tex
+                 self._pytorch_tex_module = pytorch_tex # Store for restoration
             except ImportError:
                  print_rank_0("transformer_engine_torch not found, skipping gemm patching.")
-                 self._gemm_module = None
+                 self._pytorch_tex_module = None
 
             from torch._subclasses.fake_tensor import FakeTensor # Import here for use in patch funcs
 
@@ -167,17 +169,42 @@ class TransformerEnginePlugin(TracerPlugin):
                 else:
                     print_rank_0(f"Function {func_name} not found in transformer_engine.pytorch.cpp_extensions, skipping patch.")
 
+            for func_name in funcs_to_patch:
+                if hasattr(pytorch_tex, func_name):
+                    original_func = getattr(pytorch_tex, func_name)
+                    # Avoid double-patching if enter is called again somehow
+                    patched_func = self._create_patched_norm_func(func_name, original_func)
+                    setattr(pytorch_tex, func_name, patched_func)
+                    print_rank_0(f"Patched transformer_engine_torch.{func_name} for fake tensors")
+                else:
+                    print_rank_0(f"Function {func_name} not found in transformer_engine_torch, skipping patch.")
+
             # Patch general_gemm in the gemm submodule
             gemm_func_name = "generic_gemm"
-            if self._gemm_module and hasattr(self._gemm_module, gemm_func_name):
-                 original_func = getattr(self._gemm_module, gemm_func_name)
+            if self._pytorch_tex_module and hasattr(self._pytorch_tex_module, gemm_func_name):
+                 original_func = getattr(self._pytorch_tex_module, gemm_func_name)
                  if gemm_func_name not in self.original_te_funcs:
                      self.original_te_funcs[gemm_func_name] = original_func
                      patched_func = self._create_patched_gemm_func(gemm_func_name, original_func)
-                     setattr(self._gemm_module, gemm_func_name, patched_func)
+                     setattr(self._pytorch_tex_module, gemm_func_name, patched_func)
                      print_rank_0(f"Patched transformer_engine.pytorch.cpp_extensions.gemm.{gemm_func_name} for fake tensors")
-            elif self._gemm_module:
+            elif self._pytorch_tex_module:
                  print_rank_0(f"Function {gemm_func_name} not found in transformer_engine.pytorch.cpp_extensions.gemm, skipping patch.")
+
+
+            # Functions to patch in tex module
+            funcs_to_patch = [
+                "rmsnorm_fwd",
+                "rmsnorm_bwd",
+            ]
+
+            module = importlib.import_module("transformer_engine.pytorch.ops.basic.rmsnorm")
+            for func_name in funcs_to_patch:
+                if hasattr(module, func_name):
+                    original_func = getattr(module, func_name)
+                    patched_func = self._create_patched_norm_func(func_name, original_func)
+                    setattr(module, func_name, patched_func)
+                    print_rank_0(f"Patched transformer_engine.pytorch.ops.basic.rmsnorm.{func_name} for fake tensors")
 
             # Clean up any potential old patches from previous versions of this code
             # (assuming old version patched transformer_engine.pytorch.ops.basic.layer_norm)
@@ -228,15 +255,15 @@ class TransformerEnginePlugin(TracerPlugin):
             # print_rank_0("No tex module reference found, skipping tex restoration.")
 
         # Restore original transformer_engine functions from gemm module
-        if self._gemm_module is not None:
+        if self._pytorch_tex_module is not None:
             try:
                 gemm_func_name = "generic_gemm"
                 if gemm_func_name in self.original_te_funcs:
                     orig_func = self.original_te_funcs[gemm_func_name]
-                    if hasattr(self._gemm_module, gemm_func_name):
-                        current_func = getattr(self._gemm_module, gemm_func_name)
+                    if hasattr(self._pytorch_tex_module, gemm_func_name):
+                        current_func = getattr(self._pytorch_tex_module, gemm_func_name)
                         if current_func is not orig_func:
-                            setattr(self._gemm_module, gemm_func_name, orig_func)
+                            setattr(self._pytorch_tex_module, gemm_func_name, orig_func)
                             print_rank_0(f"Restored transformer_engine.pytorch.cpp_extensions.gemm.{gemm_func_name}")
                             restored_keys.add(gemm_func_name)
                     else:
@@ -262,4 +289,4 @@ class TransformerEnginePlugin(TracerPlugin):
             self.original_te_funcs.clear() # Clear anyway
 
         self._tex_module = None
-        self._gemm_module = None 
+        self._pytorch_tex_module = None 

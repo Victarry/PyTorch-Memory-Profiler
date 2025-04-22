@@ -59,6 +59,10 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             print_rank_0(f"Error in {func_name}: {str(e)}")
 
             print(func_name, args)
+            # For debugging
+            # import IPython
+            # IPython.embed()
+            # exit(0)
             return None
 
         # Track all output tensors' memory usage and record their creation module
