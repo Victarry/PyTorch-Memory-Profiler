@@ -199,7 +199,6 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         """Generate a detailed report of tensors created in each phase"""
         report = {}
         for phase, tensors in self.phase_tensor_modules.items():
-            # 分组统计
             module_stats = defaultdict(
                 lambda: {"count": 0, "total_size": 0, "shapes": []}
             )
@@ -210,7 +209,6 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
                 module_stats[module]["total_size"] += tensor_info["size"]
                 module_stats[module]["shapes"].append(tensor_info["shape"])
 
-            # 格式化报告
             report[phase] = {
                 module: {
                     "count": stats["count"],

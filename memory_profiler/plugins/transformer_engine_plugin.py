@@ -107,25 +107,20 @@ class TransformerEnginePlugin(TracerPlugin):
 
         @functools.wraps(orig_func)
         def patched_func(*args, **kwargs):
-            import IPython
-            IPython.embed()
-            exit(0)
+            A, trans_A, B, trans_B = args[:4]
             # Check for fake tensors in A and B (usually first two tensor args)
-            has_fake = False
-            if len(args) > 0 and isinstance(args[0], FakeTensor):
-                has_fake = True
-            if len(args) > 1 and isinstance(args[1], FakeTensor):
-                 has_fake = True
-            # Also check kwargs if needed, though A and B are typically positional
-            if not has_fake:
-                has_fake = any(isinstance(v, FakeTensor) for k, v in kwargs.items() if isinstance(v, torch.Tensor) and k in ['A', 'B'])
-
+            has_fake = isinstance(A, FakeTensor) or isinstance(B, FakeTensor)
 
             if has_fake:
-                print_rank_0(f"Handling fake tensor in {func_name}. Returning placeholders.")
                 # general_gemm returns: out, bias_grad, gelu_input, extra_output
                 # Return None placeholders for now as requested
-                return None, None, None, None
+                if trans_A:
+                    A = A.transpose(0, 1)
+                if trans_B:
+                    B = B.transpose(0, 1)
+                out = B @ A
+
+                return out, None, None, None
             else:
                 # No fake tensor, call original function
                 return orig_func(*args, **kwargs)
