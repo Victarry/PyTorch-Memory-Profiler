@@ -200,20 +200,20 @@ class TransformerEnginePlugin(TracerPlugin):
     
     def _patch_te_attn_backend(self):
         module = importlib.import_module("transformer_engine.pytorch.dot_product_attention.utils")
-        orig_func = getattr(module, "get_attn_backend")
-
+        orig_func = getattr(module, "get_attention_backend")
+        from packaging.version import Version as PkgVersion
         @functools.wraps(orig_func)
         def patched_func(*args, **kwargs):
             return (
                 True,
-                "2.7.3",
+                PkgVersion("2.7.3"),
                 False,
                 None,
                 False,
                 [True, False, False],
             )
 
-        module.get_attn_backend = patched_func
+        module.get_attention_backend = patched_func
 
     def enter(self):
         try:
@@ -307,6 +307,9 @@ class TransformerEnginePlugin(TracerPlugin):
                  except ImportError:
                      pass # Module doesn't exist, nothing to clean
 
+
+            self._patch_te_attn_backend()
+            self._patch_flash_attn_fake()
 
         except ImportError:
             print_rank_0("transformer_engine.pytorch.cpp_extensions not found, skipping patching.")
