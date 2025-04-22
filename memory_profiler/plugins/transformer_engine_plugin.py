@@ -186,18 +186,133 @@ class TransformerEnginePlugin(TracerPlugin):
             rng_state: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
             dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
-            if dq is None:
-                dq = torch.empty_like(q)
-            if dk is None:
-                dk = torch.empty_like(k)
-            if dv is None:
-                dv = torch.empty_like(v)
             batch_size, seqlen_q, num_heads, _ = q.shape
             softmax_d = torch.empty((batch_size, num_heads, round_multiple(seqlen_q, 128)), device=q.device, dtype=torch.float32)
-
             return softmax_d
 
-    
+        self._flash_attn_forward_fake = _flash_attn_forward_fake
+        self._flash_attn_backward_fake = _flash_attn_backward_fake
+
+
+    def _patch_flash_attn_func(self):
+        module = importlib.import_module("transformer_engine.pytorch.attention")
+
+        class PatchedFlashAttnFunc(torch.autograd.Function):
+            @staticmethod
+            def forward(
+                ctx,
+                q,
+                k,
+                v,
+                dropout_p,
+                softmax_scale,
+                causal,
+                window_size,
+                softcap,
+                alibi_slopes,
+                deterministic,
+                return_softmax,
+                is_grad_enabled,
+            ):
+                is_grad = is_grad_enabled and any(
+                    x.requires_grad for x in [q, k, v]
+                )
+                if softmax_scale is None:
+                    softmax_scale = q.shape[-1] ** (-0.5)
+                head_size_og = q.size(3)
+                if head_size_og % 8 != 0:
+                    q = torch.nn.functional.pad(q, [0, 8 - head_size_og % 8])
+                    k = torch.nn.functional.pad(k, [0, 8 - head_size_og % 8])
+                    v = torch.nn.functional.pad(v, [0, 8 - head_size_og % 8])
+                out_padded, softmax_lse, S_dmask, rng_state = self._flash_attn_forward_fake(
+                    q,
+                    k,
+                    v,
+                    dropout_p,
+                    softmax_scale,
+                    causal=causal,
+                    window_size_left=window_size[0],
+                    window_size_right=window_size[1],
+                    softcap=softcap,
+                    alibi_slopes=alibi_slopes,
+                    return_softmax=return_softmax and dropout_p > 0,
+                )
+                if is_grad:
+                    ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
+                    ctx.dropout_p = dropout_p
+                    ctx.softmax_scale = softmax_scale
+                    ctx.causal = causal
+                    ctx.window_size = window_size
+                    ctx.softcap = softcap
+                    ctx.alibi_slopes = alibi_slopes
+                    ctx.deterministic = deterministic
+                out = out_padded[..., :head_size_og]
+                return out if not return_softmax else (out, softmax_lse, S_dmask)
+
+            @staticmethod
+            def backward(ctx, dout, *args):
+                q, k, v, out, softmax_lse, rng_state = ctx.saved_tensors
+                dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
+                head_size_og = dout.size(3)
+                dout_padded = dout
+                if head_size_og % 8 != 0:
+                    dout_padded = torch.nn.functional.pad(dout, [0, 8 - head_size_og % 8])
+                self._flash_attn_backward_fake(
+                    dout_padded,
+                    q,
+                    k,
+                    v,
+                    out,
+                    softmax_lse,
+                    dq,
+                    dk,
+                    dv,
+                    ctx.dropout_p,
+                    ctx.softmax_scale,
+                    ctx.causal,
+                    ctx.window_size[0],
+                    ctx.window_size[1],
+                    ctx.softcap,
+                    ctx.alibi_slopes,
+                    ctx.deterministic,
+                    rng_state=rng_state,
+                )
+                return dq, dk, dv, None, None, None, None, None, None, None, None, None
+
+        origin_func = getattr(module, "flash_attn_func")
+
+        @functools.wraps(origin_func)
+        def patched_flash_attn_func(
+            q,
+            k,
+            v,
+            dropout_p=0.0,
+            softmax_scale=None,
+            causal=False,
+            window_size=(-1, -1),  # -1 means infinite context window
+            softcap=0.0, # 0.0 means deactivated
+            alibi_slopes=None,
+            deterministic=False,
+            return_attn_probs=False,
+        ):
+            return PatchedFlashAttnFunc.apply(
+                q,
+                k,
+                v,
+                dropout_p,
+                softmax_scale,
+                causal,
+                window_size,
+                softcap,
+                alibi_slopes,
+                deterministic,
+                return_attn_probs,
+                torch.is_grad_enabled(),
+            )
+            
+        module.flash_attn_func = patched_flash_attn_func
+
+
     def _patch_te_attn_backend(self):
         module = importlib.import_module("transformer_engine.pytorch.dot_product_attention.utils")
         orig_func = getattr(module, "get_attention_backend")
@@ -310,6 +425,7 @@ class TransformerEnginePlugin(TracerPlugin):
 
             self._patch_te_attn_backend()
             self._patch_flash_attn_fake()
+            self._patch_flash_attn_func()
 
         except ImportError:
             print_rank_0("transformer_engine.pytorch.cpp_extensions not found, skipping patching.")
