@@ -1,8 +1,15 @@
+from typing import Optional, Tuple
 import torch
 import functools
 from .base_plugin import TracerPlugin
 from ..utils import print_rank_0
 import importlib
+
+def maybe_contiguous(x):
+    return x.contiguous() if x is not None and x.stride(-1) != 1 else x
+
+def round_multiple(x, m):
+    return (x + m - 1) // m * m
 
 class TransformerEnginePlugin(TracerPlugin):
     """Plugin for handling transformer_engine operations with fake tensors."""
@@ -129,6 +136,85 @@ class TransformerEnginePlugin(TracerPlugin):
 
         return patched_func
 
+    def _patch_flash_attn_fake(self):
+        @torch.library.register_fake("flash_attn::_flash_attn_forward")
+        def _flash_attn_forward_fake(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            dropout_p: float,
+            softmax_scale: float,
+            causal: bool,
+            window_size_left: int,
+            window_size_right: int,
+            softcap: float,
+            alibi_slopes: Optional[torch.Tensor],
+            return_softmax: bool
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
+            batch_size, seqlen_q, num_heads, q_head_size = q.shape
+            batch_size, seqlen_q, num_heads, v_head_size = v.shape
+            seqlen_k = k.shape[1]
+            out = torch.empty((batch_size, seqlen_q, num_heads, v_head_size), dtype=q.dtype, device=q.device, layout=q.layout)
+            softmax_lse = torch.empty((batch_size, num_heads, seqlen_q), dtype=torch.float32, device=q.device, layout=q.layout)
+            p = torch.empty((0,), dtype=q.dtype, device=q.device, layout=q.layout)
+            if return_softmax:
+                p = torch.empty((batch_size, num_heads, round_multiple(seqlen_q, 128), round_multiple(seqlen_k, 128)), dtype=q.dtype, device=q.device, layout=q.layout)
+            rng_state = torch.empty((2,), dtype=torch.int64, device=q.device)
+
+            return out, softmax_lse, p, rng_state
+
+        @torch.library.register_fake("flash_attn::_flash_attn_backward")
+        def _flash_attn_backward_fake(
+            dout: torch.Tensor,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            out: torch.Tensor,
+            softmax_lse: torch.Tensor,
+            dq: Optional[torch.Tensor],
+            dk: Optional[torch.Tensor],
+            dv: Optional[torch.Tensor],
+            dropout_p: float,
+            softmax_scale: float,
+            causal: bool,
+            window_size_left: int,
+            window_size_right: int,
+            softcap: float,
+            alibi_slopes: Optional[torch.Tensor],
+            deterministic: bool,
+            rng_state: Optional[torch.Tensor] = None,
+        ) -> torch.Tensor:
+            dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
+            if dq is None:
+                dq = torch.empty_like(q)
+            if dk is None:
+                dk = torch.empty_like(k)
+            if dv is None:
+                dv = torch.empty_like(v)
+            batch_size, seqlen_q, num_heads, _ = q.shape
+            softmax_d = torch.empty((batch_size, num_heads, round_multiple(seqlen_q, 128)), device=q.device, dtype=torch.float32)
+
+            return softmax_d
+
+    
+    def _patch_te_attn_backend(self):
+        module = importlib.import_module("transformer_engine.pytorch.dot_product_attention.utils")
+        orig_func = getattr(module, "get_attn_backend")
+
+        @functools.wraps(orig_func)
+        def patched_func(*args, **kwargs):
+            return (
+                True,
+                "2.7.3",
+                False,
+                None,
+                False,
+                [True, False, False],
+            )
+
+        module.get_attn_backend = patched_func
+
     def enter(self):
         try:
             # Import tex here to ensure it's available
@@ -220,6 +306,7 @@ class TransformerEnginePlugin(TracerPlugin):
                               pass # Let the new setattr(tex, ...) dominate
                  except ImportError:
                      pass # Module doesn't exist, nothing to clean
+
 
         except ImportError:
             print_rank_0("transformer_engine.pytorch.cpp_extensions not found, skipping patching.")
