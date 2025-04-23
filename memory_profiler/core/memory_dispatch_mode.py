@@ -4,7 +4,6 @@ import weakref
 import functools
 import contextlib
 from collections import defaultdict
-import gc  # Import gc for potential debugging or advanced scenarios if needed later
 
 from ..utils import print_rank_0
 
@@ -83,6 +82,20 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         else:
             return outputs
 
+    # TODO: revise this implementation
+    def create_patched_resize_(self, nbytes, device_id):
+        def patched_resize_(new_size_bytes, *resize_args, **resize_kwargs):
+            # Check if resizing to zero and if we should handle the release
+            try:
+                # Call the original resize first
+                self.release_memory(device_id, nbytes - new_size_bytes)
+                # storage.resize_(new_size_bytes, *resize_args, **resize_kwargs)
+            except Exception as e:
+                print_rank_0(f"Error during patched resize_ for storage: {e}")
+                # If original resize failed, re-raise the exception
+                raise e
+        return patched_resize_
+
     def track_tensor_memory(self, tensor, module_path):
         storage = tensor.untyped_storage()
         if storage in self.live_tensors:
@@ -116,8 +129,13 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             "phase": self.current_phase # Store creation phase
         }
 
-        # When the storage is released, reduce the memory count
-        # Pass necessary info directly to the callback
+        # # --- Patch storage.resize_ to intercept manual release --- 
+        storage.resize_ = self.create_patched_resize_(nbytes, device_id)
+
+        # Apply the patch - monkey patching the storage instance
+        # This assumes storage objects are mutable and allow attribute assignment
+        # storage.resize_ = patched_resize_
+        # --- End Patch ---
         weakref.finalize(
             storage,
             functools.partial(self.release_memory, device_id, nbytes),
@@ -184,7 +202,7 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         return self.module_stack[-1]
 
     def release_memory(self, device_id, nbytes):
-        """Called when a tensor's storage is garbage collected"""
+        """Helper method to decrease memory count - called by finalize or patched resize_(0)."""
         if device_id in self.current_memory_per_device:
              self.current_memory_per_device[device_id] -= nbytes
         # Entry in self.live_tensors is removed automatically by WeakKeyDictionary
