@@ -152,14 +152,14 @@ class TransformerEnginePlugin(TracerPlugin):
             return_softmax: bool
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-            batch_size, seqlen_q, num_heads, q_head_size = q.shape
-            batch_size, seqlen_q, num_heads, v_head_size = v.shape
+            batch_size, seqlen_q, num_q_heads, q_head_size = q.shape
+            batch_size, seqlen_q, num_v_heads, v_head_size = v.shape
             seqlen_k = k.shape[1]
-            out = torch.empty((batch_size, seqlen_q, num_heads, v_head_size), dtype=q.dtype, device=q.device, layout=q.layout)
-            softmax_lse = torch.empty((batch_size, num_heads, seqlen_q), dtype=torch.float32, device=q.device, layout=q.layout)
+            out = torch.empty((batch_size, seqlen_q, num_q_heads, v_head_size), dtype=q.dtype, device=q.device, layout=q.layout)
+            softmax_lse = torch.empty((batch_size, num_q_heads, seqlen_q), dtype=torch.float32, device=q.device, layout=q.layout)
             p = torch.empty((0,), dtype=q.dtype, device=q.device, layout=q.layout)
             if return_softmax:
-                p = torch.empty((batch_size, num_heads, round_multiple(seqlen_q, 128), round_multiple(seqlen_k, 128)), dtype=q.dtype, device=q.device, layout=q.layout)
+                p = torch.empty((batch_size, num_q_heads, round_multiple(seqlen_q, 128), round_multiple(seqlen_k, 128)), dtype=q.dtype, device=q.device, layout=q.layout)
             rng_state = torch.empty((2,), dtype=torch.int64, device=q.device)
 
             return out, softmax_lse, p, rng_state
@@ -295,6 +295,7 @@ class TransformerEnginePlugin(TracerPlugin):
             deterministic=False,
             return_attn_probs=False,
         ):
+            # import IPython; IPython.embed(); exit(0)
             return PatchedFlashAttnFunc.apply(
                 q,
                 k,
@@ -309,7 +310,7 @@ class TransformerEnginePlugin(TracerPlugin):
                 return_attn_probs,
                 torch.is_grad_enabled(),
             )
-            
+
         module.flash_attn_func = patched_flash_attn_func
 
 
