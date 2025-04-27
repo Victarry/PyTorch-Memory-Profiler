@@ -37,6 +37,7 @@ class MemoryTracer:
         self.op_counts = defaultdict(int)
         self.op_memory = defaultdict(int)
         self.phase_memory = defaultdict(int)
+        self.phase_memory_snapshots = defaultdict(lambda: {"before": {}, "after": {}})
         self.current_phase = "initialization"
 
         self.plugins = []
@@ -155,6 +156,9 @@ class MemoryTracer:
         Args:
             phase_name (str): Name of the phase (e.g., "forward", "backward", "optimizer")
         """
+        # Record memory before entering the phase
+        self.phase_memory_snapshots[phase_name]["before"] = self.get_max_memory_allocated()
+
         prev_phase = self.current_phase
         self.current_phase = phase_name
 
@@ -163,6 +167,8 @@ class MemoryTracer:
         try:
             yield
         finally:
+            # Record memory after exiting the phase
+            self.phase_memory_snapshots[phase_name]["after"] = self.get_max_memory_allocated()
             self.current_phase = prev_phase
             self.memory_dispatch_mode.current_phase = prev_phase
 
@@ -187,50 +193,82 @@ class MemoryTracer:
                 phase: f"{mem / (1024**2):.2f} MB"
                 for phase, mem in self.phase_memory.items()
             },
+            "phase_memory_snapshots": {
+                phase: {
+                    "before": {dev: f"{mem:.2f} MB" for dev, mem in data["before"].items()},
+                    "after": {dev: f"{mem:.2f} MB" for dev, mem in data["after"].items()},
+                }
+                for phase, data in self.phase_memory_snapshots.items()
+            },
             "operation_counts": dict(self.op_counts),
         }
         return stats
 
-    def print_memory_stats(self, detailed=False):
+    def print_memory_stats(self, header=None):
         """
-        Print memory statistics in a readable format.
+        Print memory statistics in a readable format using tables.
 
         Args:
             detailed (bool): Whether to print detailed per-module statistics
         """
         stats = self.get_memory_stats()
 
-        print("\n===== MEMORY USAGE ESTIMATION =====")
+        print(f"\n===== MEMORY USAGE ESTIMATION: {header if header else ''} =====")
+
+        # --- Peak Memory Usage Table ---
         print("\nPeak Memory Usage:")
+        peak_header = f"{'Device':<15} {'Peak Memory (MB)':<20}"
+        peak_separator = "-" * len(peak_header)
+        print(peak_separator)
+        print(peak_header)
+        print(peak_separator)
         for dev, mem in stats["peak_memory"].items():
-            print(f"  {dev}: {mem}")
+            mem_val = float(mem.split()[0])
+            print(f"{dev:<15} {mem_val:<20.2f}")
+        print(peak_separator)
 
+        # --- Current Memory Usage Table ---
         print("\nCurrent Memory Usage:")
+        current_header = f"{'Device':<15} {'Current Memory (MB)':<20}"
+        current_separator = "-" * len(current_header)
+        print(current_separator)
+        print(current_header)
+        print(current_separator)
         for dev, mem in stats["current_memory"].items():
-            print(f"  {dev}: {mem}")
+            mem_val = float(mem.split()[0])
+            print(f"{dev:<15} {mem_val:<20.2f}")
+        print(current_separator)
 
-        print("\nMemory Usage by Phase:")
-        for phase, mem in stats["phase_memory"].items():
-            print(f"  {phase}: {mem}")
-
-        if detailed:
-            print("\nMemory Usage by Module:")
-            for module, device_usage in stats["module_memory"].items():
-                print(f"  {module}:")
-                for dev, mem in device_usage.items():
-                    print(f"    {dev}: {mem}")
-
-            print("\nOperation Counts:")
-            for op, count in stats["operation_counts"].items():
-                print(f"  {op}: {count}")
-
-        print("\n===== TENSOR CREATION BY PHASE =====")
-        phase_tensor_report = self.memory_dispatch_mode.get_phase_tensor_report()
-        for phase, modules in phase_tensor_report.items():
-            print(f"\nPhase: {phase}")
-            for module, info in modules.items():
-                print(f"  Module: {module}")
-                print(f"    Tensor count: {info['count']}")
-                print(f"    Total size: {info['total_size_mb']}")
-                if detailed:
-                    print(f"    Tensor shapes: {info['shapes']}")
+        # --- Phase Memory Changes Table ---
+        print("\nPeak Memory Changes in each phase:")
+        # Adjust column widths to better match content
+        phase_width = 30
+        device_width = 10
+        value_width = 15
+        
+        phase_header = f"{'Phase':<{phase_width}} {'Device':<{device_width}} {'Before (MB)':<{value_width}} {'After (MB)':<{value_width}} {'Delta (MB)':<{value_width}}"
+        total_width = phase_width + device_width + value_width*3 + 4  # 4 spaces between columns
+        phase_separator = "-" * total_width
+        print(phase_separator)
+        print(phase_header)
+        print(phase_separator)
+        
+        for phase, snapshots in stats["phase_memory_snapshots"].items():
+            before_mem = snapshots["before"]
+            after_mem = snapshots["after"]
+            
+            # Get all unique devices across before and after
+            all_devices = set(list(before_mem.keys()) + list(after_mem.keys()))
+            
+            for device in all_devices:
+                before_val = float(before_mem.get(device, "0 MB").split()[0])
+                after_val = float(after_mem.get(device, "0 MB").split()[0])
+                delta = after_val - before_val
+                
+                # Only show CPU memory if it's >= 100 MB, always show CUDA memory
+                device_str = str(device)
+                is_cpu = 'cpu' in device_str.lower()
+                if (not is_cpu) or (is_cpu and (before_val >= 100 or after_val >= 100)):
+                    print(f"{phase:<{phase_width}} {device_str:<{device_width}} {before_val:<{value_width}.2f} {after_val:<{value_width}.2f} {delta:<{value_width}.2f}")
+        
+        print(phase_separator)
