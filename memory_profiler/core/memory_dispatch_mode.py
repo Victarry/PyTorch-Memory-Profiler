@@ -4,9 +4,13 @@ import weakref
 import functools
 import contextlib
 from collections import defaultdict
+from .logger import get_logger, log_memory_table
+
+# Get a logger for this module
+logger = get_logger(__name__)
 
 class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
-    def __init__(self):
+    def __init__(self, log_level=None):
         self.peak_memory_per_device = {}
         self.current_memory_per_device = {}
         # Stores {storage: {'size': nbytes, 'shape': shape, 'module': module_path}}
@@ -17,6 +21,13 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
 
         self.phase_tensor_modules = defaultdict(list)
         self.current_phase = "initialization"
+        
+        # Configure specific log level for this instance if provided
+        if log_level is not None:
+            self.logger = get_logger(f"{__name__}.instance_{id(self)}")
+            self.logger.setLevel(log_level)
+        else:
+            self.logger = logger
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs if kwargs is not None else {}
@@ -44,7 +55,7 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
                 with torch._subclasses.fake_tensor._disable_fake_tensor_mode():
                     return func(*args, **kwargs)
             except Exception as e:
-                print(f"Handling problematic operation gracefully: {func_name}")
+                self.logger.debug(f"Handling problematic operation gracefully: {func_name}")
                 if len(args) > 0 and isinstance(args[0], torch.Tensor):
                     return args[0]  # Default fallback: return the input tensor
                 return None
@@ -53,13 +64,21 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         try:
             outputs = func(*args, **kwargs)
         except Exception as e:
-            print(f"Error in {func_name}: {str(e)}")
-
-            print(func_name, args)
-            # For debugging
-            # import IPython
-            # IPython.embed()
-            # exit(0)
+            self.logger.error(f"Error in {func_name}: {str(e)}")
+            self.logger.error(f"{func_name}, {args}")
+            import traceback
+            import sys
+            
+            # Get stack trace using format_stack
+            stack_trace = traceback.format_stack()
+            
+            # Format and log the stack trace
+            self.logger.error(f"Stack trace (top level first):\n{''.join(stack_trace)}")
+            
+            # Also log the exception info if available
+            if sys.exc_info()[1] is not None:
+                self.logger.error(f"Exception: {type(e).__name__}: {str(e)}")
+            
             return None
 
         # Track all output tensors' memory usage and record their creation module
@@ -89,7 +108,7 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
                 self.release_memory(device_id, nbytes - new_size_bytes)
                 # storage.resize_(new_size_bytes, *resize_args, **resize_kwargs)
             except Exception as e:
-                print(f"Error during patched resize_ for storage: {e}")
+                self.logger.error(f"Error during patched resize_ for storage: {e}")
                 # If original resize failed, re-raise the exception
                 raise e
         return patched_resize_
@@ -280,26 +299,26 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         # Sort by size descending
         filtered_live_tensor_info.sort(key=lambda x: x["size"], reverse=True)
 
-        # Format and print the table
-        header = f"{'Module':<60} {'Phase':<20} {'Size (MB)':<15} {'Shape'}"
-        separator = "-" * (len(header) + 5) # Adjust width as needed
-
-        print(f"\nLive Tensors Report (Minimum Size: {min_memory_mb} MB):")
-        print(separator)
-        print(header)
-        print(separator)
-
+        # Format and log the table
+        rows = []
         for info in filtered_live_tensor_info:
             module_str = ".".join(info['module'].split('.')[-5:])
             phase_str = info['phase'][:18] + '..' if len(info['phase']) > 20 else info['phase']
             size_mb = info['size'] / (1024**2)
             shape_str = str(info['shape'])
-            print(f"{phase_str:<20} {module_str:<80} {size_mb:<15.2f} {shape_str}")
-
-        print(separator)
+            rows.append([phase_str, module_str, f"{size_mb:.2f}", shape_str])
+            
+        # Log the memory table
+        log_memory_table(
+            self.logger,
+            f"Live Tensors Report (Minimum Size: {min_memory_mb} MB):",
+            ["Phase", "Module", "Size (MB)", "Shape"],
+            rows
+        )
+        
+        # Log the total
         total_displayed_mb = total_displayed_memory / (1024**2)
-        print(f"Total Displayed Live Tensor Memory: {total_displayed_mb:.2f} MB")
-        print(separator + "\n")
+        self.logger.info(f"Total Displayed Live Tensor Memory: {total_displayed_mb:.2f} MB")
 
     @contextlib.contextmanager
     def trace_module(self, name):

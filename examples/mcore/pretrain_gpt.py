@@ -10,7 +10,6 @@ from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.models.gpt.gpt_layer_specs import (
-    get_gpt_layer_local_spec,
     get_gpt_layer_with_transformer_engine_spec,
 )
 from megatron.core.datasets.utils import compile_helpers
@@ -30,6 +29,7 @@ _SEQUENCE_LENGTH = 4096
 def initialize_distributed(
     tensor_model_parallel_size=1,
     pipeline_model_parallel_size=1,
+    expert_model_parallel_size=1,
     fake=False,
     create_gloo_process_groups=True,
 ):
@@ -53,19 +53,10 @@ def initialize_distributed(
     parallel_state.initialize_model_parallel(
         tensor_model_parallel_size,
         pipeline_model_parallel_size,
+        expert_model_parallel_size=expert_model_parallel_size,
+        expert_tensor_parallel_size=1,
         create_gloo_process_groups=create_gloo_process_groups,
     )
-
-
-class MemoryRecorder:
-    def __init__(self):
-        self.memory_allocated = 0
-
-    def record_memory_allocated(self, message):
-        self.memory_allocated = message
-
-    def log():
-        pass
 
 
 def get_train_data_iterator(batch_size):
@@ -100,6 +91,7 @@ def silicon_main(args, model_provider_func):
     initialize_distributed(
         tensor_model_parallel_size=args.tp_size,
         pipeline_model_parallel_size=args.pp_size,
+        expert_model_parallel_size=args.ep_size,
     )
     model_parallel_cuda_manual_seed(123)
 
@@ -138,7 +130,7 @@ def silicon_main(args, model_provider_func):
 
     forward_backward_func = get_forward_backward_func()
 
-    for iteration in range(1):
+    for iteration in range(2):
         optim.zero_grad()
 
         rank = torch.distributed.get_rank()
@@ -187,6 +179,7 @@ def estimated_main(args, model_provider_func):
     initialize_distributed(
         tensor_model_parallel_size=args.tp_size,
         pipeline_model_parallel_size=args.pp_size,
+        expert_model_parallel_size=args.ep_size,
         fake=True,
         create_gloo_process_groups=False,
     )
@@ -199,7 +192,8 @@ def estimated_main(args, model_provider_func):
         torch.cuda.set_device(rank)
 
         # Create model
-        gpt_model = model_provider_func()
+        with estimator.track_phase("model_creation"):
+            gpt_model = model_provider_func()
 
         # Register hooks for memory tracking
         hook_handles = estimator.memory_dispatch_mode.register_hooks_to_module(
@@ -247,41 +241,25 @@ def estimated_main(args, model_provider_func):
         forward_backward_func = get_forward_backward_func()
 
         # Running the model for 5 iterations
-        for iteration in range(1):
+        for iteration in range(2):
             optim.zero_grad()
 
-            print(
-                f"profiled current_memory_allocated before forward: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB"
-            )
-            print(
-                f"profiled max_memory_allocated before forward: {estimator.get_max_memory_allocated()[0] / (1024 ** 2):.2f} MB"
-            )
+            with estimator.track_phase("forward-backward"):
+                losses_reduced = forward_backward_func(
+                    forward_step_func=forward_step_func,
+                    data_iterator=train_iterator,
+                    model=gpt_model,
+                    num_microbatches=args.ga,
+                    seq_length=_SEQUENCE_LENGTH,
+                    micro_batch_size=args.mbs,
+                    decoder_seq_length=_SEQUENCE_LENGTH,
+                    forward_only=False,
+                )
+            
+            with estimator.track_phase("optimizer_step"):
+                optim.step()
 
-            losses_reduced = forward_backward_func(
-                forward_step_func=forward_step_func,
-                data_iterator=train_iterator,
-                model=gpt_model,
-                num_microbatches=args.ga,
-                seq_length=_SEQUENCE_LENGTH,
-                micro_batch_size=args.mbs,
-                decoder_seq_length=_SEQUENCE_LENGTH,
-                forward_only=False,
-            )
-
-            print(
-                f"profiled current_memory_allocated after forward-backward pass: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB"
-            )
-            print(
-                f"profiled max_memory_allocated after forward-backward pass: {estimator.get_max_memory_allocated()[0] / (1024 ** 2):.2f} MB"
-            )
-            optim.step()
-            print(
-                f"profiled current_memory_allocated after optimizer step: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB"
-            )
-            print(
-                f"profiled max_memory_allocated after optimizer step: {estimator.get_max_memory_allocated()[0] / (1024 ** 2):.2f} MB"
-            )
-
+        estimator.print_memory_stats()
         # Remove hooks
         estimator.memory_dispatch_mode.remove_hooks(hook_handles)
 
@@ -291,30 +269,38 @@ def parse_args():
     parser.add_argument("--estimated", action="store_true")
     parser.add_argument("--tp-size", type=int, default=1)
     parser.add_argument("--pp-size", type=int, default=1)
+    parser.add_argument("--ep-size", type=int, default=1)
     parser.add_argument("--mbs", type=int, default=1)
     parser.add_argument("--ga", type=int, default=8)
     parser.add_argument("--model", type=str, default="gpt")
-    parser.add_argument("--use-te", action="store_true")
     return parser.parse_args()
 
 
-def gpt_model_provider(use_te=False):
+def gpt_model_provider(args):
     """Build the model."""
 
     transformer_config = TransformerConfig(
-        num_layers=4,
+        num_layers=2,
         hidden_size=4096,
         num_attention_heads=16,
         use_cpu_initialization=True,
         pipeline_dtype=torch.float32,
+        tensor_model_parallel_size=args.tp_size,
+        pipeline_model_parallel_size=args.pp_size,
+        sequence_parallel=args.tp_size > 1,
+        expert_tensor_parallel_size=1,
+        bf16=True,
     )
+    if args.estimated:
+        if hasattr(transformer_config, "memory_tracing"):
+            transformer_config.memory_tracing = True
+            transformer_config._update_for_memory_tracing()
+        else:
+            print("❗️No using patched megatron-lm for memory tracing. May encounter unexpected issues.")
 
     pre_process = parallel_state.is_pipeline_first_stage()
     post_process = parallel_state.is_pipeline_last_stage()
-    if use_te:
-        layer_spec = get_gpt_layer_with_transformer_engine_spec()
-    else:
-        layer_spec = get_gpt_layer_local_spec()
+    layer_spec = get_gpt_layer_with_transformer_engine_spec()
 
     gpt_model = GPTModel(
         config=transformer_config,
@@ -323,14 +309,14 @@ def gpt_model_provider(use_te=False):
         max_sequence_length=_SEQUENCE_LENGTH,
         pre_process=pre_process,
         post_process=post_process,
-    )
+    ).bfloat16()
 
     return gpt_model
 
 
-def moe_model_provider(use_te=False):
+def moe_model_provider(args):
     config = TransformerConfig(
-        num_layers=4,
+        num_layers=2,
         hidden_size=4096,
         moe_ffn_hidden_size=8192,
         num_attention_heads=16,
@@ -344,34 +330,43 @@ def moe_model_provider(use_te=False):
         moe_expert_capacity_factor=1.0,
         moe_pad_expert_input_to_capacity=True,
         pipeline_dtype=torch.float32,
+        expert_model_parallel_size=args.ep_size,
+        tensor_model_parallel_size=args.tp_size,
+        pipeline_model_parallel_size=args.pp_size,
+        sequence_parallel=args.tp_size > 1,
+        expert_tensor_parallel_size=1,
+        bf16=True,
     )
+    if args.estimated:
+        if hasattr(config, "memory_tracing"):
+            config.memory_tracing = True
+            config._update_for_memory_tracing()
+        else:
+            print("❗️No using patched megatron-lm for memory tracing. May encounter unexpected issues.")
+
     pre_process = parallel_state.is_pipeline_first_stage()
     post_process = parallel_state.is_pipeline_last_stage()
 
-    if use_te:
-        layer_spec = get_gpt_layer_with_transformer_engine_spec(
-            num_experts=8, moe_grouped_gemm=True
-        )
-    else:
-        layer_spec = get_gpt_layer_local_spec(
-            num_experts=8, moe_grouped_gemm=False, normalization="RMSNorm"
-        )
-    return GPTModel(
+    layer_spec = get_gpt_layer_with_transformer_engine_spec(
+        num_experts=8, moe_grouped_gemm=False
+    )
+    gpt_model = GPTModel(
         config=config,
         transformer_layer_spec=layer_spec,
         vocab_size=128,
         max_sequence_length=_SEQUENCE_LENGTH,
         pre_process=pre_process,
         post_process=post_process,
-    )
+    ).bfloat16()
+    return gpt_model
 
 
 if __name__ == "__main__":
     args = parse_args()
     if args.model == "gpt":
-        model_provider_func = partial(gpt_model_provider, use_te=args.use_te)
+        model_provider_func = partial(gpt_model_provider, args=args)
     elif args.model == "moe":
-        model_provider_func = partial(moe_model_provider, use_te=args.use_te)
+        model_provider_func = partial(moe_model_provider, args=args)
     else:
         raise ValueError(f"Invalid model: {args.model}")
 

@@ -1,8 +1,10 @@
 import torch
 import functools
 from .base_plugin import TracerPlugin
-from ..utils import print_rank_0
+from ..core.logger import get_logger
 
+# Get a logger for this module
+logger = get_logger(__name__)
 
 class DistributedPlugin(TracerPlugin):
     """Plugin for handling distributed operations with fake tensors."""
@@ -10,6 +12,7 @@ class DistributedPlugin(TracerPlugin):
     def setup(self, tracer):
         self.tracer = tracer
         self.original_funcs = {}
+        self.logger = get_logger(f"{__name__}.instance_{id(self)}")
 
     def enter(self):
         if not hasattr(torch, "distributed") or not torch.distributed.is_available():
@@ -69,14 +72,15 @@ class DistributedPlugin(TracerPlugin):
             def make_patched_dist_func(orig_func):
                 @functools.wraps(orig_func)
                 def patched_dist_func(*args, **kwargs):
-                    # print(f"Calling {orig_func.__name__} with args: {args} and kwargs: {kwargs}")
+                    # self.logger.debug(f"Calling {orig_func.__name__} with args: {args} and kwargs: {kwargs}")
                     return DummyDistributedOutput()
 
                 return patched_dist_func
-            print(f"Setting {func_name} to patched function")
+            self.logger.debug(f"Setting {func_name} to patched function")
             setattr(torch.distributed, func_name, make_patched_dist_func(original_func))
 
     def exit(self, exc_type, exc_val, exc_tb):
         # Restore original distributed functions
         for func_name, orig_func in self.original_funcs.items():
             setattr(torch.distributed, func_name, orig_func)
+            self.logger.debug(f"Restored original {func_name} function")

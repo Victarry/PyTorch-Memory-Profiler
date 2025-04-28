@@ -13,6 +13,7 @@ A utility library designed to estimate and analyze the memory footprint of PyTor
     *   `megatron-core` (specifically P2P communication for pipeline parallelism)
     *   `transformer-engine`
 *   **Detailed Reporting:** Generate reports on peak/current memory, memory usage per module, memory usage per phase, and tensor creation statistics.
+*   **Structured Logging System:** Provides a flexible logging system that allows configuration of log levels, console and file output, and rich formatting.
 
 ## Requirements
 
@@ -20,6 +21,7 @@ A utility library designed to estimate and analyze the memory footprint of PyTor
 *   Optional:
     *   `megatron-core`: For tracing memory in models using Megatron's pipeline parallelism.
     *   `transformer-engine`: For tracing memory in models using Transformer Engine layers.
+    *   `rich`: For enhanced log formatting and visual output.
 
 ## Installation
 
@@ -112,6 +114,80 @@ print(f"\nPeak estimated memory across all phases: {estimator.get_max_memory_all
 ```
 *(See `examples/simple/single_gpu.py` for a runnable version without phase tracking.)*
 
+## Logging System
+
+The pytorch-memory-tracing library includes a structured logging system that replaces the previous print statements with configurable logging. This allows for better control over log output and integration with existing logging systems.
+
+### Basic Usage
+
+```python
+import logging
+from memory_profiler import MemoryTracer, configure_logging, get_logger
+
+# Configure logging with desired level
+configure_logging(level=logging.INFO)
+
+# Get a logger for your module
+logger = get_logger(__name__)
+
+# Use in your code
+logger.info("Starting memory profiling")
+estimator = MemoryTracer(device="cuda")
+
+# The MemoryTracer will use the configured logging system
+with estimator:
+    # ... (profiling code)
+    pass
+
+# All output will go through the logging system
+estimator.print_memory_stats()
+```
+
+### Configuration Options
+
+The logging system can be configured with various options:
+
+```python
+from memory_profiler import configure_logging
+import logging
+
+# Basic configuration with console output
+configure_logging(level=logging.INFO)
+
+# Log to file and console with rich formatting
+configure_logging(
+    level=logging.DEBUG,
+    log_to_file=True,
+    log_file="memory_profile.log",
+    rich_format=True
+)
+
+# Disable rich formatting (for non-interactive environments)
+configure_logging(level=logging.INFO, rich_format=False)
+```
+
+### Environment Variables
+
+You can also control logging through environment variables:
+
+```bash
+# Set the default logging level
+export MEMORY_PROFILER_LOG_LEVEL=10  # DEBUG=10, INFO=20, WARNING=30, etc.
+```
+
+### Instance-Specific Logging
+
+You can set different logging levels for specific tracer instances:
+
+```python
+import logging
+from memory_profiler import MemoryTracer
+
+# Create a tracer with a specific log level
+verbose_tracer = MemoryTracer(device="cuda", log_level=logging.DEBUG)
+normal_tracer = MemoryTracer(device="cuda", log_level=logging.INFO)
+```
+
 ## Advanced Usage & Plugins
 
 For complex models, especially those using distributed training libraries, the built-in plugins are crucial.
@@ -138,7 +214,7 @@ By combining these mechanisms, the library simulates the computation graph's exe
 ## TODO
 - [x] Integration to training loop of Megatron-LM
 - [ ] Support for TE and fused kernel in MCore
-- [ ] Update the logging system for better usability
+- [x] Update the logging system for better usability
 - [ ] Build a GUI or visualization system
 
 ## Known Limitations & Considerations

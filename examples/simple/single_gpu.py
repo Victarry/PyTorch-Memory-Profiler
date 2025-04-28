@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 import torch
 import torch.nn as nn
+import logging
 
 from memory_profiler import MemoryTracer
+from memory_profiler.core.logger import get_logger, configure_logging
+
+# Configure logging system
+configure_logging(level=logging.INFO)
+logger = get_logger(__name__)
 
 class MLP(nn.Module):
     """A minimal MLP layer for testing."""
@@ -82,21 +88,20 @@ def run_estimation():
         target = fake_input.clone().view(-1)
         logits = logits.view(-1, vocab_size)
         loss = loss_fn(logits, target)
-        print(f"profiled current_memory_allocated after forward pass: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB")
+        logger.info(f"profiled current_memory_allocated after forward pass: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB")
 
         # Backward pass
         loss.backward()
-        print(f"profiled current_memory_allocated after backward pass: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB")
+        logger.info(f"profiled current_memory_allocated after backward pass: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB")
         # Optimizer step
         optimizer.step()
-        print(f"profiled current_memory_allocated after optimizer step: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB")
+        logger.info(f"profiled current_memory_allocated after optimizer step: {estimator.get_current_memory_allocated()[0] / (1024 ** 2):.2f} MB")
 
         # Remove hooks
         estimator.memory_dispatch_mode.remove_hooks(hook_handles)
 
     # Print memory statistics
-    # print("\n===== MEMORY USAGE =====")
-    # estimator.print_memory_stats(detailed=True)
+    estimator.print_memory_stats(header="ESTIMATION RESULTS")
 
 
 def run_actual():
@@ -128,16 +133,15 @@ def run_actual():
     target = input_ids.clone().view(-1)
     logits = logits.view(-1, vocab_size)
     loss = loss_fn(logits, target)
-    # print(f"actual max_memory_allocated after forward pass: {torch.cuda.max_memory_allocated() / (1024 ** 2):.2f} MB")
-    print(f"actual current_memory_allocated after forward pass: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB")
+    logger.info(f"actual current_memory_allocated after forward pass: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB")
     
     # Backward pass
     loss.backward()
-    print(f"actual current_memory_allocated after backward pass: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB")
+    logger.info(f"actual current_memory_allocated after backward pass: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB")
 
     # Optimizer step
     optimizer.step()
-    print(f"actual current_memory_allocated after optimizer step: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB")
+    logger.info(f"actual current_memory_allocated after optimizer step: {torch.cuda.memory_allocated() / (1024 ** 2):.2f} MB")
 
 if __name__ == "__main__":
     run_estimation()

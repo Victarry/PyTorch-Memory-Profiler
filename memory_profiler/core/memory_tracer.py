@@ -9,6 +9,10 @@ from ..plugins import (
     P2PCommunicationPlugin,
     MegatronCorePlugin,
 )
+from .logger import get_logger, log_memory_table
+
+# Get a logger for this module
+logger = get_logger(__name__)
 
 
 class MemoryTracer:
@@ -16,15 +20,24 @@ class MemoryTracer:
     Memory tracing utility that uses fake tensors to estimate memory usage.
     """
 
-    def __init__(self, device="cuda"):
+    def __init__(self, device="cuda", log_level=None):
         """
         Initialize the MemoryTracer.
 
         Args:
             device (str): The device to emulate, default is "cuda"
+            log_level (int, optional): Logging level to use for this tracer
         """
         self.device = device
         self.memory_dispatch_mode = MemoryDispatchMode()
+        
+        # Configure specific log level for this tracer if provided
+        if log_level is not None:
+            self.logger = get_logger(f"{__name__}.instance_{id(self)}")
+            self.logger.setLevel(log_level)
+        else:
+            self.logger = logger
+            
         try:
             from torch._subclasses import FakeTensorMode
 
@@ -209,50 +222,42 @@ class MemoryTracer:
         Print memory statistics in a readable format using tables.
 
         Args:
-            detailed (bool): Whether to print detailed per-module statistics
+            header (str, optional): Optional header text for the memory stats
         """
         stats = self.get_memory_stats()
 
-        print(f"\n===== MEMORY USAGE ESTIMATION: {header if header else ''} =====")
+        # Log the memory usage header
+        header_text = f"MEMORY USAGE ESTIMATION: {header if header else ''}"
+        self.logger.info(f"\n===== {header_text} =====")
 
         # --- Peak Memory Usage Table ---
-        print("\nPeak Memory Usage:")
-        peak_header = f"{'Device':<15} {'Peak Memory (MB)':<20}"
-        peak_separator = "-" * len(peak_header)
-        print(peak_separator)
-        print(peak_header)
-        print(peak_separator)
+        rows = []
         for dev, mem in stats["peak_memory"].items():
             mem_val = float(mem.split()[0])
-            print(f"{dev:<15} {mem_val:<20.2f}")
-        print(peak_separator)
+            rows.append([dev, f"{mem_val:.2f}"])
+        
+        log_memory_table(
+            self.logger,
+            "Peak Memory Usage:",
+            ["Device", "Peak Memory (MB)"],
+            rows
+        )
 
         # --- Current Memory Usage Table ---
-        print("\nCurrent Memory Usage:")
-        current_header = f"{'Device':<15} {'Current Memory (MB)':<20}"
-        current_separator = "-" * len(current_header)
-        print(current_separator)
-        print(current_header)
-        print(current_separator)
+        rows = []
         for dev, mem in stats["current_memory"].items():
             mem_val = float(mem.split()[0])
-            print(f"{dev:<15} {mem_val:<20.2f}")
-        print(current_separator)
+            rows.append([dev, f"{mem_val:.2f}"])
+            
+        log_memory_table(
+            self.logger,
+            "Current Memory Usage:",
+            ["Device", "Current Memory (MB)"],
+            rows
+        )
 
         # --- Phase Memory Changes Table ---
-        print("\nPeak Memory Changes in each phase:")
-        # Adjust column widths to better match content
-        phase_width = 30
-        device_width = 10
-        value_width = 15
-        
-        phase_header = f"{'Phase':<{phase_width}} {'Device':<{device_width}} {'Before (MB)':<{value_width}} {'After (MB)':<{value_width}} {'Delta (MB)':<{value_width}}"
-        total_width = phase_width + device_width + value_width*3 + 4  # 4 spaces between columns
-        phase_separator = "-" * total_width
-        print(phase_separator)
-        print(phase_header)
-        print(phase_separator)
-        
+        rows = []
         for phase, snapshots in stats["phase_memory_snapshots"].items():
             before_mem = snapshots["before"]
             after_mem = snapshots["after"]
@@ -269,6 +274,11 @@ class MemoryTracer:
                 device_str = str(device)
                 is_cpu = 'cpu' in device_str.lower()
                 if (not is_cpu) or (is_cpu and (before_val >= 100 or after_val >= 100)):
-                    print(f"{phase:<{phase_width}} {device_str:<{device_width}} {before_val:<{value_width}.2f} {after_val:<{value_width}.2f} {delta:<{value_width}.2f}")
+                    rows.append([phase, device_str, f"{before_val:.2f}", f"{after_val:.2f}", f"{delta:.2f}"])
         
-        print(phase_separator)
+        log_memory_table(
+            self.logger,
+            "Peak Memory Changes in each phase:",
+            ["Phase", "Device", "Before (MB)", "After (MB)", "Delta (MB)"],
+            rows
+        )

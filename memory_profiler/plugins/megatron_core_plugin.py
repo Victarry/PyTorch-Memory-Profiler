@@ -1,11 +1,10 @@
 import torch
 import importlib
-import logging
-
 from .base_plugin import TracerPlugin
+from ..core.logger import get_logger
 
-# Configure logging
-logger = logging.getLogger(__name__)
+# Get a logger for this module
+logger = get_logger(__name__)
 
 # List of modules to patch for distributed functions
 target_modules = [
@@ -24,16 +23,17 @@ class MegatronCorePlugin(TracerPlugin):
 
     def setup(self, tracer):
         super().setup(tracer)
-        logger.info("Setting up MegatronCorePlugin")
+        self.logger = get_logger(f"{__name__}.instance_{id(self)}")
+        self.logger.info("Setting up MegatronCorePlugin")
 
     def enter(self):
         """Apply patches when entering the context manager"""
-        logger.info("Applying Megatron-LM core patches")
+        self.logger.info("Applying Megatron-LM core patches")
         apply_megatron_core_patch()
 
     def exit(self, exc_type, exc_val, exc_tb):
         """Method called when exiting the context manager"""
-        logger.info("MegatronCorePlugin context exited")
+        self.logger.info("MegatronCorePlugin context exited")
 
 
 def apply_megatron_core_patch():
@@ -116,7 +116,9 @@ def patch_distributed_functions():
                 f"Module {module_name} not found. Skipping patch for this module."
             )
         except Exception as e:
-            logger.error(f"Error patching module {module_name}: {e}", exc_info=True)
+            logger.error(f"Error patching module {module_name}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     if patched_something:
         logger.info(
@@ -175,7 +177,9 @@ def patch_multi_tensor_functions():
             "Module megatron.core.optimizer.clip_grads not found. Skipping multi-tensor patch."
         )
     except Exception as e:
-        logger.error(f"Error patching multi-tensor functions: {e}", exc_info=True)
+        logger.error(f"Error patching multi-tensor functions: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 def patch_adam_optimizer():
@@ -213,7 +217,9 @@ def patch_adam_optimizer():
             f"Module megatron.core.optimizer.distrib_optimizer not found. Skipping Adam patch. {e}"
         )
     except Exception as e:
-        logger.error(f"Error patching Adam optimizer: {e}", exc_info=True)
+        logger.error(f"Error patching Adam optimizer: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 def patch_coalescing_manager():
@@ -298,12 +304,15 @@ def patch_coalescing_manager():
             )
         except Exception as e:
             logger.error(
-                f"Error patching _coalescing_manager in param_and_grad_buffer: {e}",
-                exc_info=True,
+                f"Error patching _coalescing_manager in param_and_grad_buffer: {e}"
             )
+            import traceback
+            logger.error(traceback.format_exc())
 
     except Exception as e:
-        logger.error(f"Error in patch_coalescing_manager: {e}", exc_info=True)
+        logger.error(f"Error in patch_coalescing_manager: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 def patch_timer_log_function():
@@ -345,8 +354,8 @@ def patch_timer_log_function():
                     elapsed_time = timer.elapsed(reset=reset) * 1000.0 / normalizer
                     output_string += f"\n  {(name + ' ').ljust(48, '.')}: {elapsed_time:.2f}"
                     
-            # Print the output
-            print(output_string, flush=True)
+            # Print the output using logger
+            logger.info(output_string)
         
         # Replace the log function
         setattr(timers_module.Timers, "log", patched_log)
@@ -377,7 +386,9 @@ def patch_timer_log_function():
     except ImportError:
         logger.warning("Module megatron.core.timers not found. Skipping timer log patch.")
     except Exception as e:
-        logger.error(f"Error patching timer log function: {e}", exc_info=True)
+        logger.error(f"Error patching timer log function: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 # To use this plugin, import it and call apply_megatron_core_patch
