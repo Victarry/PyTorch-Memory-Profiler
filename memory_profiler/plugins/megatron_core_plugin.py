@@ -24,16 +24,16 @@ class MegatronCorePlugin(TracerPlugin):
     def setup(self, tracer):
         super().setup(tracer)
         self.logger = get_logger(f"{__name__}.instance_{id(self)}")
-        self.logger.info("Setting up MegatronCorePlugin")
+        self.logger.debug("Setting up MegatronCorePlugin")
 
     def enter(self):
         """Apply patches when entering the context manager"""
-        self.logger.info("Applying Megatron-LM core patches")
+        self.logger.debug("Applying Megatron-LM core patches")
         apply_megatron_core_patch()
 
     def exit(self, exc_type, exc_val, exc_tb):
         """Method called when exiting the context manager"""
-        self.logger.info("MegatronCorePlugin context exited")
+        self.logger.debug("MegatronCorePlugin context exited")
 
 
 def apply_megatron_core_patch():
@@ -54,7 +54,7 @@ def apply_megatron_core_patch():
     patch_coalescing_manager()
     patch_timer_log_function()
 
-    logger.info("All Megatron-LM core patches have been applied.")
+    logger.debug("All Megatron-LM core patches have been applied.")
 
 
 def patch_distributed_functions():
@@ -85,7 +85,7 @@ def patch_distributed_functions():
             if hasattr(module, "dist_all_gather_func"):
                 if getattr(module, "dist_all_gather_func") != all_gather_func:
                     setattr(module, "dist_all_gather_func", all_gather_func)
-                    logger.info(f"Patched dist_all_gather_func in {module_name}")
+                    logger.debug(f"Patched dist_all_gather_func in {module_name}")
                     module_patched = True
                 else:
                     logger.debug(f"dist_all_gather_func already set in {module_name}")
@@ -97,7 +97,7 @@ def patch_distributed_functions():
             if hasattr(module, "dist_reduce_scatter_func"):
                 if getattr(module, "dist_reduce_scatter_func") != reduce_scatter_func:
                     setattr(module, "dist_reduce_scatter_func", reduce_scatter_func)
-                    logger.info(f"Patched dist_reduce_scatter_func in {module_name}")
+                    logger.debug(f"Patched dist_reduce_scatter_func in {module_name}")
                     module_patched = True
                 else:
                     logger.debug(
@@ -121,11 +121,11 @@ def patch_distributed_functions():
             logger.error(traceback.format_exc())
 
     if patched_something:
-        logger.info(
+        logger.debug(
             "Successfully applied Megatron-LM core patches for distributed functions."
         )
     else:
-        logger.info(
+        logger.debug(
             "Megatron-LM core patching for distributed functions did not modify any modules (either already patched or attributes not found)."
         )
 
@@ -168,7 +168,7 @@ def patch_multi_tensor_functions():
         setattr(clip_grads_module, "l2_norm_impl", local_l2_norm)
         setattr(clip_grads_module, "multi_tensor_scale_impl", local_scale)
 
-        logger.info(
+        logger.debug(
             "Successfully patched multi_tensor functions in megatron.core.optimizer.clip_grads"
         )
 
@@ -194,7 +194,7 @@ def patch_adam_optimizer():
         )
         if hasattr(optimizer_module, "Adam"):
             setattr(optimizer_module, "Adam", torch.optim.AdamW)
-            logger.info(
+            logger.debug(
                 "Successfully patched Adam to use torch.optim.AdamW in megatron.core.optimizer.optimizer.__init__"
             )
         else:
@@ -206,7 +206,7 @@ def patch_adam_optimizer():
         )
         if hasattr(distrib_optimizer_module, "Adam"):
             setattr(distrib_optimizer_module, "Adam", torch.optim.AdamW)
-            logger.info(
+            logger.debug(
                 "Successfully patched Adam to use torch.optim.AdamW in megatron.core.optimizer.distrib_optimizer"
             )
         else:
@@ -267,7 +267,7 @@ def patch_coalescing_manager():
                     "_coalescing_manager",
                     safe_coalescing_manager,
                 )
-                logger.info(
+                logger.debug(
                     "Successfully patched _coalescing_manager in param_and_grad_buffer"
                 )
             else:
@@ -295,7 +295,7 @@ def patch_coalescing_manager():
                         return original_coalescing_manager(*args, **kwargs)
 
                 torch.distributed._coalescing_manager = patched_coalescing_manager
-                logger.info(
+                logger.debug(
                     "Successfully patched torch.distributed._coalescing_manager for Megatron calls"
                 )
         except ImportError:
@@ -359,7 +359,7 @@ def patch_timer_log_function():
         
         # Replace the log function
         setattr(timers_module.Timers, "log", patched_log)
-        logger.info("Successfully patched Timers.log function to avoid all-reduce operations")
+        logger.debug("Successfully patched Timers.log function to avoid all-reduce operations")
         
         # Also patch write method to avoid distributed operations
         def patched_write(self, names, writer, iteration, normalizer=1.0, reset=True, barrier=False):
@@ -381,7 +381,7 @@ def patch_timer_log_function():
         
         # Replace the write function
         setattr(timers_module.Timers, "write", patched_write)
-        logger.info("Successfully patched Timers.write function to avoid all-reduce operations")
+        logger.debug("Successfully patched Timers.write function to avoid all-reduce operations")
         
     except ImportError:
         logger.warning("Module megatron.core.timers not found. Skipping timer log patch.")

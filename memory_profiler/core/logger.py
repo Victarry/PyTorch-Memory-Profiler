@@ -7,7 +7,7 @@ from rich.logging import RichHandler
 
 # Configure default logging levels
 DEFAULT_LOG_LEVEL = logging.INFO
-CONSOLE = Console(highlight=True)
+CONSOLE = Console(highlight=True, width=120)
 
 def configure_logging(
     level: Optional[int] = None,
