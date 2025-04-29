@@ -1,6 +1,7 @@
 import torch
 import contextlib
 from collections import defaultdict
+import logging
 
 from .memory_dispatch_mode import MemoryDispatchMode
 from ..plugins import (
@@ -240,7 +241,8 @@ class MemoryTracer:
             self.logger,
             "Peak Memory Usage:",
             ["Device", "Peak Memory (MB)"],
-            rows
+            rows,
+            level=logging.CRITICAL
         )
 
         # --- Current Memory Usage Table ---
@@ -253,7 +255,8 @@ class MemoryTracer:
             self.logger,
             "Current Memory Usage:",
             ["Device", "Current Memory (MB)"],
-            rows
+            rows,
+            level=logging.CRITICAL
         )
 
         # --- Phase Memory Changes Table ---
@@ -272,13 +275,14 @@ class MemoryTracer:
                 
                 # Only show CPU memory if it's >= 100 MB, always show CUDA memory
                 device_str = str(device)
-                is_cpu = 'cpu' in device_str.lower()
-                if (not is_cpu) or (is_cpu and (before_val >= 100 or after_val >= 100)):
+                is_cuda = 'cuda' in device_str.lower()
+                if is_cuda or (not is_cuda and (before_val >= 100 or after_val >= 100)):
                     rows.append([phase, device_str, f"{before_val:.2f}", f"{after_val:.2f}", f"{delta:.2f}"])
         
         log_memory_table(
             self.logger,
             "Peak Memory Changes in each phase:",
             ["Phase", "Device", "Before (MB)", "After (MB)", "Delta (MB)"],
-            rows
+            rows,
+            level=logging.CRITICAL
         )

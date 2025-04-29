@@ -53,10 +53,13 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
                 logger.error(f"Unexpected number of arguments for aten.split_with_sizes.default: {args}")
 
             if isinstance(input_tensor, torch._subclasses.fake_tensor.FakeTensor):
-                num_chunks = len(split_sizes)
-                self.logger.debug(f"Patching aten.split_with_sizes for FakeTensor. Using torch.chunk with {num_chunks} chunks along dim {dim}.")
-                # Use torch.chunk logic for uniform splitting
-                outputs = torch.chunk(input_tensor, num_chunks, dim=dim)
+                if isinstance(split_sizes, torch._subclasses.fake_tensor.FakeTensor):
+                    num_chunks = len(split_sizes)
+                    self.logger.debug(f"Patching aten.split_with_sizes for FakeTensor. Using torch.chunk with {num_chunks} chunks along dim {dim}.")
+                    # Use torch.chunk logic for uniform splitting
+                    outputs = torch.chunk(input_tensor, num_chunks, dim=dim)
+                else:
+                    outputs = torch.split(input_tensor, split_sizes, dim=dim)
                 # Ensure outputs are tracked and potentially moved to CUDA like other outputs
                 tree_map_only(
                     torch.Tensor, lambda t: self.track_tensor_memory(t, self.current_module_path), outputs
