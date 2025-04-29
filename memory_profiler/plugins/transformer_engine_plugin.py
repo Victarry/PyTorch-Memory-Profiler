@@ -139,6 +139,38 @@ class TransformerEnginePlugin(TracerPlugin):
                 return orig_func(*args, **kwargs)
 
         return patched_func
+    
+    def _create_patched_grouped_gemm_func(self, func_name, orig_func):
+        """Creates a patched version of a GEMM function to handle fake tensors."""
+        from torch._subclasses.fake_tensor import FakeTensor
+
+        @functools.wraps(orig_func)
+        def patched_func(*args, **kwargs):
+            A, trans_A, B, trans_B = args[:4]
+            # import IPython; IPython.embed(); exit(0)
+            out = args[4]
+            # Check for fake tensors in A and B (usually first two tensor args)
+            has_fake = isinstance(A[0], FakeTensor) or isinstance(B[0], FakeTensor)
+
+            if has_fake:
+                # general_gemm returns: out, bias_grad, gelu_input, extra_output
+                # Return None placeholders for now as requested
+                for i in range(len(A)):
+                    if trans_A:
+                        a = A[i].transpose(0, 1)
+                    else:
+                        a = A[i]
+                    if trans_B:
+                        b = B[i].transpose(0, 1)
+                    else:
+                        b = B[i]
+                    _ = b @ a
+                return [None] * len(A)
+            else:
+                # No fake tensor, call original function
+                return orig_func(*args, **kwargs)
+
+        return patched_func
 
     def _patch_flash_attn_fake(self):
         @torch.library.register_fake("flash_attn::_flash_attn_forward")
@@ -397,6 +429,17 @@ class TransformerEnginePlugin(TracerPlugin):
             elif self._pytorch_tex_module:
                  self.logger.warning(f"Function {gemm_func_name} not found in transformer_engine.pytorch.cpp_extensions.gemm, skipping patch.")
 
+            # Patch grouped_gemm in the gemm submodule
+            gemm_func_name = "te_general_grouped_gemm"
+            if self._pytorch_tex_module and hasattr(self._pytorch_tex_module, gemm_func_name):
+                 original_func = getattr(self._pytorch_tex_module, gemm_func_name)
+                 if gemm_func_name not in self.original_te_funcs:
+                     self.original_te_funcs[gemm_func_name] = original_func
+                     patched_func = self._create_patched_grouped_gemm_func(gemm_func_name, original_func)
+                     setattr(self._pytorch_tex_module, gemm_func_name, patched_func)
+                     self.logger.debug(f"Patched transformer_engine.pytorch.cpp_extensions.gemm.{gemm_func_name} for fake tensors")
+            elif self._pytorch_tex_module:
+                 self.logger.warning(f"Function {gemm_func_name} not found in transformer_engine.pytorch.cpp_extensions.gemm, skipping patch.")
 
             # Functions to patch in rmsnorm module
             funcs_to_patch = [
@@ -470,22 +513,18 @@ class TransformerEnginePlugin(TracerPlugin):
         # Restore original transformer_engine functions from gemm module
         if self._pytorch_tex_module is not None:
             try:
-                gemm_func_name = "generic_gemm"
-                if gemm_func_name in self.original_te_funcs:
+                for gemm_func_name in self.original_te_funcs:
                     orig_func = self.original_te_funcs[gemm_func_name]
                     if hasattr(self._pytorch_tex_module, gemm_func_name):
                         current_func = getattr(self._pytorch_tex_module, gemm_func_name)
-                        if current_func is not orig_func:
-                            setattr(self._pytorch_tex_module, gemm_func_name, orig_func)
-                            self.logger.info(f"Restored transformer_engine.pytorch.cpp_extensions.gemm.{gemm_func_name}")
-                            restored_keys.add(gemm_func_name)
-                    else:
-                         self.logger.warning(f"Could not find {gemm_func_name} in gemm during restoration.")
-
+                    if current_func is not orig_func:
+                        setattr(self._pytorch_tex_module, gemm_func_name, orig_func)
+                        self.logger.debug(f"Restored transformer_engine.pytorch.cpp_extensions.gemm.{gemm_func_name}")
+                        restored_keys.add(gemm_func_name)
             except Exception as e:
-                 self.logger.error(f"Error restoring transformer_engine gemm functions: {e}")
-                 import traceback
-                 self.logger.error(traceback.format_exc())
+                self.logger.error(f"Error restoring transformer_engine gemm functions: {e}")
+                import traceback
+                self.logger.error(traceback.format_exc())
         # else:
              # self.logger.debug("No gemm module reference found, skipping gemm restoration.")
 

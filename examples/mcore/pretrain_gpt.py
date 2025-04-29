@@ -348,7 +348,7 @@ def moe_model_provider(args):
     post_process = parallel_state.is_pipeline_last_stage()
 
     layer_spec = get_gpt_layer_with_transformer_engine_spec(
-        num_experts=8, moe_grouped_gemm=False
+        num_experts=8, moe_grouped_gemm=True
     )
     gpt_model = GPTModel(
         config=config,

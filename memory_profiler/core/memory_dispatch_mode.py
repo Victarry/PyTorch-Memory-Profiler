@@ -42,6 +42,34 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         # Check if this is an operation that we need to handle specially
         func_name = str(func)
         
+        # --- Patch for aten.split_with_sizes.default with FakeTensor ---
+        if func_name == "aten.split_with_sizes.default":
+            if len(args) == 3:
+                input_tensor, split_sizes, dim = args
+            elif len(args) == 2:
+                input_tensor, split_sizes = args
+                dim = kwargs.get('dim', 0)
+            else:
+                logger.error(f"Unexpected number of arguments for aten.split_with_sizes.default: {args}")
+
+            if isinstance(input_tensor, torch._subclasses.fake_tensor.FakeTensor):
+                num_chunks = len(split_sizes)
+                self.logger.debug(f"Patching aten.split_with_sizes for FakeTensor. Using torch.chunk with {num_chunks} chunks along dim {dim}.")
+                # Use torch.chunk logic for uniform splitting
+                outputs = torch.chunk(input_tensor, num_chunks, dim=dim)
+                # Ensure outputs are tracked and potentially moved to CUDA like other outputs
+                tree_map_only(
+                    torch.Tensor, lambda t: self.track_tensor_memory(t, self.current_module_path), outputs
+                )
+                outputs_mod = []
+                for output in outputs:
+                    if isinstance(output, torch.Tensor):
+                         outputs_mod.append(output.to('cuda'))
+                    else:
+                        outputs_mod.append(output)
+                return tuple(outputs_mod)
+        # --- End Patch ---
+
         # Handle distributed operations more directly
         if any(op_name in func_name for op_name in problematic_ops):
             # For random operations
