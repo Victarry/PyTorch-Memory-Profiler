@@ -82,8 +82,19 @@ def log_memory_table(logger: logging.Logger,
         level: Logging level for this message
     """
     if logger.isEnabledFor(level):
+        # Calculate maximum width for each column
+        col_widths = [len(h) for h in headers]
+        
+        for row in rows:
+            for i, cell in enumerate(row):
+                col_widths[i] = max(col_widths[i], len(str(cell)))
+        
+        # Function to format a row
+        def format_row(items, widths):
+            return " | ".join(f"{str(item):<{widths[i]}}" for i, item in enumerate(items))
+
         # Create the table header
-        header_row = " | ".join(f"{h}" for h in headers)
+        header_row = format_row(headers, col_widths)
         separator = "-" * len(header_row)
         
         # Log the table
@@ -93,7 +104,7 @@ def log_memory_table(logger: logging.Logger,
         logger.log(level, separator)
         
         for row in rows:
-            formatted_row = " | ".join(f"{value}" for value in row)
+            formatted_row = format_row(row, col_widths)
             logger.log(level, formatted_row)
         
         logger.log(level, separator)
