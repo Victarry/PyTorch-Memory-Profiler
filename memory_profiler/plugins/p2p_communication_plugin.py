@@ -153,7 +153,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of send_forward_recv_backward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(output_tensor, tensor_shape, config):
+        def patched_func(output_tensor, tensor_shape, config, *args):
             # Import needed module inside the function
             import megatron.core as core
 
@@ -175,7 +175,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of send_backward_recv_forward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(input_tensor_grad, tensor_shape, config):
+        def patched_func(input_tensor_grad, tensor_shape, config, *args):
             # Import needed module inside the function
             import megatron.core as core
 
@@ -200,7 +200,7 @@ class P2PCommunicationPlugin(TracerPlugin):
 
         @functools.wraps(orig_func)
         def patched_func(
-            output_tensor, recv_prev, tensor_shape, config, overlap_p2p_comm=False
+            output_tensor, recv_prev, tensor_shape, config, overlap_p2p_comm=False, *args
         ):
             # Always use fake tensors
             if tensor_shape is not None:
@@ -238,7 +238,7 @@ class P2PCommunicationPlugin(TracerPlugin):
 
         @functools.wraps(orig_func)
         def patched_func(
-            input_tensor_grad, recv_next, tensor_shape, config, overlap_p2p_comm=False
+            input_tensor_grad, recv_next, tensor_shape, config, overlap_p2p_comm=False, *args
         ):
             # Always use fake tensors
             if tensor_shape is not None:
@@ -275,7 +275,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of recv_forward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(tensor_shape, config):
+        def patched_func(tensor_shape, config, *args):
             # Import needed module inside the function
             import megatron.core as core
 
@@ -301,7 +301,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of recv_backward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(tensor_shape, config):
+        def patched_func(tensor_shape, config, *args):
             # Import needed module inside the function
             import megatron.core as core
 
@@ -327,7 +327,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of send_forward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(output_tensor, config):
+        def patched_func(output_tensor, config, *args):
             # Import needed module inside the function
             import megatron.core as core
 
@@ -344,7 +344,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of send_backward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(input_tensor_grad, config):
+        def patched_func(input_tensor_grad, config, *args   ):
             # Import needed module inside the function
             import megatron.core as core
 
