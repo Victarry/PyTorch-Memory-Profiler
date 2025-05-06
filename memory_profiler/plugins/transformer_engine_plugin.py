@@ -126,6 +126,7 @@ class TransformerEnginePlugin(TracerPlugin):
                 # general_gemm returns: out, bias_grad, gelu_input, extra_output
                 # Return None placeholders for now as requested
                 A = torch.squeeze(A)
+                A = A.reshape(-1, A.shape[-1])
                 B = torch.squeeze(B)
                 if trans_A:
                     A = A.transpose(0, 1)
