@@ -3,7 +3,7 @@ import contextlib
 from collections import defaultdict
 import logging
 
-from .memory_dispatch_mode import MemoryDispatchMode
+from .memory_dispatch_mode import MemoryDispatchMode, ProblematicOpsDispatchMode
 from ..plugins import (
     DistributedPlugin,
     TransformerEnginePlugin,
@@ -30,7 +30,8 @@ class MemoryTracer:
             log_level (int, optional): Logging level to use for this tracer
         """
         self.device = device
-        self.memory_dispatch_mode = MemoryDispatchMode()
+        self.problematic_ops_mode = ProblematicOpsDispatchMode(log_level=log_level)
+        self.memory_dispatch_mode = MemoryDispatchMode(log_level=log_level)
         
         # Configure specific log level for this tracer if provided
         if log_level is not None:
@@ -121,6 +122,7 @@ class MemoryTracer:
             plugin.enter()
 
         self.fake_mode.__enter__()
+        self.problematic_ops_mode.__enter__()
         self.memory_dispatch_mode.__enter__()
         return self
 
@@ -130,6 +132,7 @@ class MemoryTracer:
             plugin.exit(exc_type, exc_val, exc_tb)
 
         self.memory_dispatch_mode.__exit__(exc_type, exc_val, exc_tb)
+        self.problematic_ops_mode.__exit__(exc_type, exc_val, exc_tb)
         return self.fake_mode.__exit__(exc_type, exc_val, exc_tb)
 
     def get_max_memory_allocated(self):

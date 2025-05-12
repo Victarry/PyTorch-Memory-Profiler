@@ -213,8 +213,12 @@ By combining these mechanisms, the library simulates the computation graph's exe
 
 ## TODO
 - [x] Integration to training loop of Megatron-LM
-- [ ] Support for TE and fused kernel in MCore
+- [x] Support for TE and fused kernel in MCore
 - [x] Update the logging system for better usability
+- [ ] Refactor code with torch `fake_collectives.py`
+- [ ] Refactor code with torch `mod_tracker.py`
+- [ ] Record peak memory snapshot
+- [ ] Show modulize tensor lifetime with tensor's create/save/free time.
 - [ ] Build a GUI or visualization system
 
 ## Known Limitations & Considerations

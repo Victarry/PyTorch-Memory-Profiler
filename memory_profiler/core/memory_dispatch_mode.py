@@ -9,6 +9,81 @@ from .logger import get_logger, log_memory_table
 # Get a logger for this module
 logger = get_logger(__name__)
 
+class ProblematicOpsDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
+    def __init__(self, log_level=None):
+        super().__init__()
+        if log_level is not None:
+            # Create a unique logger name for this instance
+            self.logger = get_logger(f"{__name__}.ProblematicOpsDispatchMode.instance_{id(self)}")
+            self.logger.setLevel(log_level)
+        else:
+            # Use the module-level logger by default, which is 'logger' from the outer scope of this file
+            self.logger = logger
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs if kwargs is not None else {}
+        func_name = str(func)
+
+        # List of problematic operations that need special handling
+        problematic_ops_list = [
+            "_local_scalar_dense",  # Data-dependent scalar conversion
+            "random_",              # Random generation
+            "item",                 # Tensor to scalar conversion
+        ]
+
+        if any(op_name in func_name for op_name in problematic_ops_list):
+            self.logger.debug(f"ProblematicOpsDispatchMode: Intercepted problematic op {func_name}")
+            
+            # For random operations
+            if "random_" in func_name:
+                self.logger.debug(f"ProblematicOpsDispatchMode: Handling '{func_name}' by returning input tensor.")
+                return args[0]  # Return the input tensor unchanged
+            # For scalar conversion operations
+            elif "_local_scalar_dense" in func_name or "item" in func_name:
+                self.logger.debug(f"ProblematicOpsDispatchMode: Handling '{func_name}' by returning scalar 42.")
+                return 42  # Return a fixed scalar value
+            
+            # Fallback for other ops in problematic_ops_list if not covered above
+            try:
+                self.logger.debug(f"ProblematicOpsDispatchMode: For '{func_name}', attempting to run with fake tensor mode disabled.")
+                with torch._subclasses.fake_tensor._disable_fake_tensor_mode():
+                    out = func(*args, **kwargs)
+                self.logger.debug(f"ProblematicOpsDispatchMode: Successfully ran '{func_name}' with fake tensor mode disabled.")
+                return out
+            except Exception as e:
+                self.logger.warning(
+                    f"ProblematicOpsDispatchMode: Exception while running '{func_name}' with fake tensor mode disabled: {e}. "
+                    "Falling back."
+                )
+                if len(args) > 0 and isinstance(args[0], torch.Tensor):
+                    self.logger.debug(f"ProblematicOpsDispatchMode: Fallback for '{func_name}': returning input tensor.")
+                    return args[0]
+                self.logger.debug(f"ProblematicOpsDispatchMode: Fallback for '{func_name}': returning None.")
+                return None
+        
+        # If func_name is not in problematic_ops_list, let the dispatch chain continue.
+
+        # --- Patch for aten.split_with_sizes.default with FakeTensor ---
+        if func_name == "aten.split_with_sizes.default":
+            if len(args) == 3:
+                input_tensor, split_sizes, dim = args
+            elif len(args) == 2:
+                input_tensor, split_sizes = args
+                dim = kwargs.get('dim', 0)
+            else:
+                logger.error(f"Unexpected number of arguments for aten.split_with_sizes.default: {args}")
+
+            if isinstance(input_tensor, torch._subclasses.fake_tensor.FakeTensor):
+                if isinstance(split_sizes, torch._subclasses.fake_tensor.FakeTensor):
+                    num_chunks = len(split_sizes)
+                    self.logger.debug(f"Patching aten.split_with_sizes for FakeTensor. Using torch.chunk with {num_chunks} chunks along dim {dim}.")
+                    # Use torch.chunk logic for uniform splitting
+                    return torch.chunk(input_tensor, num_chunks, dim=dim)
+                else:
+                    return torch.split(input_tensor, split_sizes, dim=dim)
+
+        return func(*args, **kwargs)
+
 class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
     def __init__(self, log_level=None):
         self.peak_memory_per_device = {}
@@ -31,66 +106,9 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs if kwargs is not None else {}
-        
-        # List of problematic operations that need special handling
-        problematic_ops = [
-            "_local_scalar_dense",  # Data-dependent scalar conversion
-            "random_",              # Random generation
-            "item",                 # Tensor to scalar conversion
-        ]
 
-        # Check if this is an operation that we need to handle specially
         func_name = str(func)
-        
-        # --- Patch for aten.split_with_sizes.default with FakeTensor ---
-        if func_name == "aten.split_with_sizes.default":
-            if len(args) == 3:
-                input_tensor, split_sizes, dim = args
-            elif len(args) == 2:
-                input_tensor, split_sizes = args
-                dim = kwargs.get('dim', 0)
-            else:
-                logger.error(f"Unexpected number of arguments for aten.split_with_sizes.default: {args}")
 
-            if isinstance(input_tensor, torch._subclasses.fake_tensor.FakeTensor):
-                if isinstance(split_sizes, torch._subclasses.fake_tensor.FakeTensor):
-                    num_chunks = len(split_sizes)
-                    self.logger.debug(f"Patching aten.split_with_sizes for FakeTensor. Using torch.chunk with {num_chunks} chunks along dim {dim}.")
-                    # Use torch.chunk logic for uniform splitting
-                    outputs = torch.chunk(input_tensor, num_chunks, dim=dim)
-                else:
-                    outputs = torch.split(input_tensor, split_sizes, dim=dim)
-                # Ensure outputs are tracked and potentially moved to CUDA like other outputs
-                tree_map_only(
-                    torch.Tensor, lambda t: self.track_tensor_memory(t, self.current_module_path), outputs
-                )
-                outputs_mod = []
-                for output in outputs:
-                    if isinstance(output, torch.Tensor):
-                         outputs_mod.append(output.to('cuda'))
-                    else:
-                        outputs_mod.append(output)
-                return tuple(outputs_mod)
-        # --- End Patch ---
-
-        # Handle distributed operations more directly
-        if any(op_name in func_name for op_name in problematic_ops):
-            # For random operations
-            if "random_" in func_name:
-                return args[0]  # Return the input tensor unchanged
-            # For scalar conversion operations
-            elif "_local_scalar_dense" in func_name or "item" in func_name:
-                return 42  # Return a fixed scalar value
-            # Try with disabled fake tensor mode, but handle exceptions gracefully
-            try:
-                with torch._subclasses.fake_tensor._disable_fake_tensor_mode():
-                    return func(*args, **kwargs)
-            except Exception as e:
-                self.logger.debug(f"Handling problematic operation gracefully: {func_name}")
-                if len(args) > 0 and isinstance(args[0], torch.Tensor):
-                    return args[0]  # Default fallback: return the input tensor
-                return None
-        
         current_module = self.current_module_path
         try:
             outputs = func(*args, **kwargs)

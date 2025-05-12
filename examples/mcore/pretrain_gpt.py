@@ -24,6 +24,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 from memory_profiler import MemoryTracer
 
 _SEQUENCE_LENGTH = 4096
+_VOCAB_SIZE = 32000
 
 
 def initialize_distributed(
@@ -73,7 +74,7 @@ def get_train_data_iterator(batch_size):
         reset_position_ids=False,
         reset_attention_mask=False,
         eod_mask_loss=False,
-        tokenizer=_NullTokenizer(vocab_size=_SEQUENCE_LENGTH),
+        tokenizer=_NullTokenizer(vocab_size=_VOCAB_SIZE-1),
     )
 
     datasets = BlendedMegatronDatasetBuilder(
@@ -305,7 +306,7 @@ def gpt_model_provider(args):
     gpt_model = GPTModel(
         config=transformer_config,
         transformer_layer_spec=layer_spec,
-        vocab_size=128,
+        vocab_size=_VOCAB_SIZE,
         max_sequence_length=_SEQUENCE_LENGTH,
         pre_process=pre_process,
         post_process=post_process,
@@ -353,7 +354,7 @@ def moe_model_provider(args):
     gpt_model = GPTModel(
         config=config,
         transformer_layer_spec=layer_spec,
-        vocab_size=128,
+        vocab_size=_VOCAB_SIZE,
         max_sequence_length=_SEQUENCE_LENGTH,
         pre_process=pre_process,
         post_process=post_process,
