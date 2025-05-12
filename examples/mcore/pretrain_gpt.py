@@ -196,11 +196,6 @@ def estimated_main(args, model_provider_func):
         with estimator.track_phase("model_creation"):
             gpt_model = model_provider_func()
 
-        # Register hooks for memory tracking
-        hook_handles = estimator.memory_dispatch_mode.register_hooks_to_module(
-            gpt_model
-        )
-
         device = torch.device("cuda")
         gpt_model.to(device)
 
@@ -261,9 +256,7 @@ def estimated_main(args, model_provider_func):
                 optim.step()
 
         estimator.print_memory_stats()
-        # Remove hooks
-        estimator.memory_dispatch_mode.remove_hooks(hook_handles)
-        estimator.memory_dispatch_mode.log_peak_memory_snapshot()
+        estimator.memory_dispatch_mode.save_peak_memory_snapshot_to_file("peak_memory_snapshot.json")
 
 
 def parse_args():

@@ -4,6 +4,7 @@ from collections import defaultdict
 import logging
 
 from .memory_dispatch_mode import MemoryDispatchMode, ProblematicOpsDispatchMode
+from .mod_tracker import ModTracker
 from ..plugins import (
     DistributedPlugin,
     TransformerEnginePlugin,
@@ -30,8 +31,9 @@ class MemoryTracer:
             log_level (int, optional): Logging level to use for this tracer
         """
         self.device = device
+        self.mod_tracker = ModTracker()
         self.problematic_ops_mode = ProblematicOpsDispatchMode(log_level=log_level)
-        self.memory_dispatch_mode = MemoryDispatchMode(log_level=log_level)
+        self.memory_dispatch_mode = MemoryDispatchMode(log_level=log_level, mod_tracker=self.mod_tracker)
         
         # Configure specific log level for this tracer if provided
         if log_level is not None:
@@ -39,7 +41,7 @@ class MemoryTracer:
             self.logger.setLevel(log_level)
         else:
             self.logger = logger
-            
+
         try:
             from torch._subclasses import FakeTensorMode
 
@@ -118,6 +120,7 @@ class MemoryTracer:
 
     def __enter__(self):
         """Enter the context manager, enabling both fake tensors and memory estimation."""
+        self.mod_tracker.__enter__()
         for plugin in self.plugins:
             plugin.enter()
 
@@ -128,12 +131,14 @@ class MemoryTracer:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exit the context manager, disabling both fake tensors and memory estimation."""
-        for plugin in self.plugins:
-            plugin.exit(exc_type, exc_val, exc_tb)
-
         self.memory_dispatch_mode.__exit__(exc_type, exc_val, exc_tb)
         self.problematic_ops_mode.__exit__(exc_type, exc_val, exc_tb)
-        return self.fake_mode.__exit__(exc_type, exc_val, exc_tb)
+        self.fake_mode.__exit__(exc_type, exc_val, exc_tb)
+        
+        for plugin in self.plugins:
+            plugin.exit(exc_type, exc_val, exc_tb)
+        self.mod_tracker.__exit__(exc_type, exc_val, exc_tb)
+        return False
 
     def get_max_memory_allocated(self):
         """Get the maximum memory allocated during the context manager."""

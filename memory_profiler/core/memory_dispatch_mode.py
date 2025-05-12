@@ -4,7 +4,11 @@ import weakref
 import functools
 import contextlib
 from collections import defaultdict
+from typing import Optional
+import traceback
+import json
 from .logger import get_logger, log_memory_table
+from .mod_tracker import ModTracker
 
 # Get a logger for this module
 logger = get_logger(__name__)
@@ -85,18 +89,26 @@ class ProblematicOpsDispatchMode(torch.utils._python_dispatch.TorchDispatchMode)
         return func(*args, **kwargs)
 
 class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
-    def __init__(self, log_level=None):
+    def __init__(self, log_level=None, mod_tracker: Optional[ModTracker] = None):
         self.peak_memory_per_device = {}
         self.current_memory_per_device = {}
-        self.peak_memory_snapshot_per_device = {} # Stores snapshots of live_tensors at peak memory
+        self.peak_memory_snapshot_per_device = {} # Stores snapshots {device_id: [info_dict1, info_dict2, ...]}
         # Stores {storage: {'size': nbytes, 'shape': shape, 'module': module_path}}
         self.live_tensors = weakref.WeakKeyDictionary()
 
-        self.module_stack = []
         self.module_memory_usage = defaultdict(lambda: defaultdict(int))
 
         self.phase_tensor_modules = defaultdict(list)
         self.current_phase = "initialization"
+        
+        self.mod_tracker = mod_tracker
+        self._internal_module_stack = ["Unknown"]
+
+        if self.mod_tracker:
+            self.mod_tracker.register_user_hooks(
+                pre_fw_hook=self._user_pre_fw_hook,
+                post_fw_hook=self._user_post_fw_hook
+            )
         
         # Configure specific log level for this instance if provided
         if log_level is not None:
@@ -104,6 +116,26 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             self.logger.setLevel(log_level)
         else:
             self.logger = logger
+
+    def _user_pre_fw_hook(self, module, _input):
+        if self.mod_tracker:
+            fqn = self.mod_tracker.get_known_fqn(module)
+            if fqn:
+                self._internal_module_stack.append(fqn)
+            else:
+                # Fallback if FQN is not found, though ModTracker should provide it
+                self._internal_module_stack.append(f"UnidentifiedModule_{type(module).__name__}")
+        else:
+            # Should not happen if tracer passes mod_tracker
+            self._internal_module_stack.append(f"NoModTracker_{type(module).__name__}")
+
+    def _user_post_fw_hook(self, module, _input, _output):
+        if len(self._internal_module_stack) > 1: # Keep the base "Unknown"
+            # Pop the FQN associated with the completed module
+            # We assume user hooks are called in a stack-like manner for nested modules
+            self._internal_module_stack.pop()
+        else:
+            self.logger.warning(f"Attempted to pop from module stack for {module} but stack is too small or mismatched.")
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs if kwargs is not None else {}
@@ -116,7 +148,6 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         except Exception as e:
             self.logger.error(f"Error in {func_name}: {str(e)}")
             self.logger.error(f"{func_name}, {args}")
-            import traceback
             import sys
             
             # Get stack trace using format_stack
@@ -169,6 +200,9 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             return
         device_id = tensor.device
 
+        # Capture stack trace
+        current_stack_trace = traceback.format_stack()
+
         # Calculate memory usage
         nbytes = storage.nbytes()
 
@@ -176,22 +210,21 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         if device_id not in self.current_memory_per_device:
             self.current_memory_per_device[device_id] = 0
             self.peak_memory_per_device[device_id] = 0
-            self.peak_memory_snapshot_per_device[device_id] = {} # Initialize snapshot for new device
+            self.peak_memory_snapshot_per_device[device_id] = [] # Initialize as list for new device
 
         self.current_memory_per_device[device_id] += nbytes
         
         # Check if current memory exceeds peak memory for this device
         if self.current_memory_per_device[device_id] > self.peak_memory_per_device[device_id]:
             self.peak_memory_per_device[device_id] = self.current_memory_per_device[device_id]
-            # Save a snapshot of live tensors for this device
-            # We need to iterate and copy, as live_tensors is a WeakKeyDictionary
-            # and its contents might change. We want a snapshot at this specific moment.
-            current_snapshot = {}
-            for s, info in list(self.live_tensors.items()): # Iterate over a copy of items
+            # Save a snapshot of live tensors' info for this device
+            current_snapshot_list = []
+            # Iterate over a copy of items from live_tensors for safety
+            for _storage, info in list(self.live_tensors.items()):
                 if info.get("device") == device_id: # Only tensors on the current device
                     # Create a copy of the info dict to avoid modifying the live_tensors entry
-                    current_snapshot[s] = info.copy() 
-            self.peak_memory_snapshot_per_device[device_id] = current_snapshot
+                    current_snapshot_list.append(info.copy()) 
+            self.peak_memory_snapshot_per_device[device_id] = current_snapshot_list
 
         # Update module memory usage statistics
         self.module_memory_usage[module_path][device_id] += nbytes
@@ -202,7 +235,8 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             "shape": tensor.shape,
             "module": module_path,
             "device": device_id, # Store device for release
-            "phase": self.current_phase # Store creation phase
+            "phase": self.current_phase, # Store creation phase
+            "stack_trace": current_stack_trace # Store stack trace
         }
 
         # # --- Patch storage.resize_ to intercept manual release --- 
@@ -226,56 +260,12 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             }
         )
 
-    def make_module_pre_forward_hook(self):
-        """Create a forward hook for tracking module execution
-        The hook is called before the forward pass of the module"""
-
-        def hook(module, inputs, kargs):
-            module_path = f"{module.__class__.__name__}"
-            if self.module_stack:
-                parent_path = self.module_stack[-1]
-                module_path = f"{parent_path}.{module_path}"
-
-            # Push the current module to stack before processing outputs
-            self.module_stack.append(module_path)
-
-        return hook
-
-    def make_module_forward_hook(self):
-        """Create a forward hook for tracking module execution
-        The hook will be called every time after forward() has computed an output."""
-
-        def hook(module, inputs, outputs):
-            self.module_stack.pop()
-
-        return hook
-
-    def register_hooks_to_module(self, module):
-        """Register forward hooks to the given module and all its submodules"""
-        pre_forward_hook = self.make_module_pre_forward_hook()
-        forward_hook = self.make_module_forward_hook()
-        handles = []
-
-        # Register hook to the main module and all submodules
-        for m in [module] + list(module.modules()):
-            handles.append(m.register_forward_hook(forward_hook))
-            handles.append(
-                m.register_forward_pre_hook(pre_forward_hook, with_kwargs=True)
-            )
-
-        return handles
-
-    def remove_hooks(self, handles):
-        """Remove all registered hooks using their handles"""
-        for handle in handles:
-            handle.remove()
-
     @property
     def current_module_path(self):
-        """Get the current module path"""
-        if not self.module_stack:
+        """Get the current module path from the internal stack."""
+        if not self._internal_module_stack: # Should always have "Unknown" at least
             return "Unknown"
-        return self.module_stack[-1]
+        return self._internal_module_stack[-1]
 
     def release_memory(self, device_id, nbytes):
         """Helper method to decrease memory count - called by finalize or patched resize_(0)."""
@@ -409,20 +399,20 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             snapshot_tensors_info = []
             total_snapshot_memory = 0
             
-            device_snapshot = self.peak_memory_snapshot_per_device.get(dev_id, {})
-            if not device_snapshot:
+            device_snapshot_list = self.peak_memory_snapshot_per_device.get(dev_id, [])
+            if not device_snapshot_list:
                 self.logger.info(f"Peak memory snapshot for device {dev_id} is empty or not found.")
                 continue
 
-            # Iterate through the snapshot items
-            for storage_key, info in device_snapshot.items():
-                # storage_key is the original storage, but info is a copy
-                # We assume info dict contains all necessary details like 'size', 'shape', 'module', 'phase'
+            # Iterate through the snapshot items (list of info dicts)
+            for info in device_snapshot_list:
+                # We assume info dict contains all necessary details like 'size', 'shape', 'module', 'phase', 'stack_trace'
                 snapshot_tensors_info.append({
                     "size": info["size"],
                     "shape": info["shape"],
                     "module": info["module"],
-                    "phase": info.get("phase", "N/A") # Ensure phase is present
+                    "phase": info.get("phase", "N/A"), 
+                    "stack_trace": info.get("stack_trace", []) # Ensure stack_trace is handled
                 })
                 total_snapshot_memory += info["size"]
 
@@ -454,11 +444,104 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             total_snapshot_mb = total_snapshot_memory / (1024**2)
             self.logger.info(f"Total Memory in Snapshot for {dev_id}: {total_snapshot_mb:.2f} MB")
 
+    def save_peak_memory_snapshot_to_file(self, filepath: str, device_id=None, min_memory_mb=0):
+        """Saves the peak memory snapshot to a JSON file.
+
+        Args:
+            filepath (str): Path to the file where the snapshot will be saved.
+            device_id (optional): Specific device (e.g., torch.device('cuda:0')) to save the snapshot for.
+                                  If None, saves snapshots for all devices that have one.
+            min_memory_mb (float): Minimum memory size (in MB) for a tensor to be included in the snapshot.
+                                   Defaults to 0 (show all).
+        """
+        devices_to_log = []
+        if device_id is not None:
+            # Convert device_id to string if it's a torch.device object for consistent key access
+            device_key = str(device_id) if isinstance(device_id, torch.device) else device_id
+            if device_key in self.peak_memory_snapshot_per_device:
+                devices_to_log.append(device_key)
+            elif device_id in self.peak_memory_snapshot_per_device: # Fallback for direct device object
+                devices_to_log.append(device_id)
+            else:
+                self.logger.info(f"No peak memory snapshot found for device {device_id}.")
+                return
+        else:
+            devices_to_log = list(self.peak_memory_snapshot_per_device.keys())
+
+        if not devices_to_log:
+            self.logger.info("No peak memory snapshots available to save.")
+            return
+
+        min_memory_bytes = min_memory_mb * (1024**2)
+        snapshot_data_to_save = {}
+
+        for dev_id_key in devices_to_log:
+            # Use dev_id_key which is consistently a string if conversion happened
+            actual_dev_id_for_lookup = dev_id_key
+            # If original keys are torch.device objects, we might need to find the correct one
+            if not isinstance(dev_id_key, (str)) and dev_id_key not in self.peak_memory_snapshot_per_device:
+                 # Attempt to find by string representation if original keys are torch.device
+                 found = False
+                 for k_dev in self.peak_memory_snapshot_per_device.keys():
+                     if str(k_dev) == str(dev_id_key):
+                         actual_dev_id_for_lookup = k_dev
+                         found = True
+                         break
+                 if not found:
+                     self.logger.warning(f"Could not reliably map key {dev_id_key} for snapshot saving.")
+                     continue
+
+
+            snapshot_tensors_info = []
+            
+            device_snapshot_list = self.peak_memory_snapshot_per_device.get(actual_dev_id_for_lookup, [])
+            if not device_snapshot_list:
+                self.logger.info(f"Peak memory snapshot for device {actual_dev_id_for_lookup} is empty or not found during save.")
+                continue
+
+            for info_item in device_snapshot_list:
+                if info_item["size"] >= min_memory_bytes:
+                    # Prepare info for JSON serialization
+                    serializable_info = {
+                        "size_bytes": info_item["size"],
+                        "size_mb": info_item["size"] / (1024**2),
+                        "shape": str(info_item["shape"]), # Convert torch.Size to string
+                        "module": info_item["module"],
+                        "phase": info_item.get("phase", "N/A"),
+                        "stack_trace": info_item.get("stack_trace", []) # Include stack trace
+                    }
+                    snapshot_tensors_info.append(serializable_info)
+            
+            # Sort by size descending before saving
+            snapshot_tensors_info.sort(key=lambda x: x["size_bytes"], reverse=True)
+            
+            # Use string representation of device ID as key in the output file
+            snapshot_data_to_save[str(actual_dev_id_for_lookup)] = {
+                "peak_memory_mb": self.peak_memory_per_device.get(actual_dev_id_for_lookup, 0) / (1024**2),
+                "tensors": snapshot_tensors_info
+            }
+
+        try:
+            with open(filepath, 'w') as f:
+                json.dump(snapshot_data_to_save, f, indent=4)
+            self.logger.info(f"Peak memory snapshot saved to {filepath}")
+        except IOError as e:
+            self.logger.error(f"Failed to save peak memory snapshot to {filepath}: {e}")
+        except TypeError as e:
+            self.logger.error(f"TypeError during JSON serialization for {filepath}: {e}. Ensure all data is serializable.")
+
     @contextlib.contextmanager
-    def trace_module(self, name):
+    def trace_module(self, name: str):
         """Context manager for manually tracking non-module code blocks"""
-        self.module_stack.append(name)
+        self._internal_module_stack.append(name)
         try:
             yield
         finally:
-            self.module_stack.pop() 
+            if self._internal_module_stack and self._internal_module_stack[-1] == name:
+                self._internal_module_stack.pop()
+            else:
+                self.logger.warning(
+                    f"Mismatched pop in trace_module for '{name}'. Current stack top: "
+                    f"'{self._internal_module_stack[-1] if self._internal_module_stack else 'EMPTY'}'. "
+                    f"Full stack: {self._internal_module_stack}"
+                ) 
