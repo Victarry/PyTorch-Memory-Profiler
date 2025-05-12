@@ -88,6 +88,7 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
     def __init__(self, log_level=None):
         self.peak_memory_per_device = {}
         self.current_memory_per_device = {}
+        self.peak_memory_snapshot_per_device = {} # Stores snapshots of live_tensors at peak memory
         # Stores {storage: {'size': nbytes, 'shape': shape, 'module': module_path}}
         self.live_tensors = weakref.WeakKeyDictionary()
 
@@ -175,12 +176,22 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         if device_id not in self.current_memory_per_device:
             self.current_memory_per_device[device_id] = 0
             self.peak_memory_per_device[device_id] = 0
+            self.peak_memory_snapshot_per_device[device_id] = {} # Initialize snapshot for new device
 
         self.current_memory_per_device[device_id] += nbytes
-        self.peak_memory_per_device[device_id] = max(
-            self.peak_memory_per_device[device_id],
-            self.current_memory_per_device[device_id],
-        )
+        
+        # Check if current memory exceeds peak memory for this device
+        if self.current_memory_per_device[device_id] > self.peak_memory_per_device[device_id]:
+            self.peak_memory_per_device[device_id] = self.current_memory_per_device[device_id]
+            # Save a snapshot of live tensors for this device
+            # We need to iterate and copy, as live_tensors is a WeakKeyDictionary
+            # and its contents might change. We want a snapshot at this specific moment.
+            current_snapshot = {}
+            for s, info in list(self.live_tensors.items()): # Iterate over a copy of items
+                if info.get("device") == device_id: # Only tensors on the current device
+                    # Create a copy of the info dict to avoid modifying the live_tensors entry
+                    current_snapshot[s] = info.copy() 
+            self.peak_memory_snapshot_per_device[device_id] = current_snapshot
 
         # Update module memory usage statistics
         self.module_memory_usage[module_path][device_id] += nbytes
@@ -368,6 +379,80 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         # Log the total
         total_displayed_mb = total_displayed_memory / (1024**2)
         self.logger.info(f"Total Displayed Live Tensor Memory: {total_displayed_mb:.2f} MB")
+
+    def log_peak_memory_snapshot(self, device_id=None, min_memory_mb=0):
+        """Logs a table of tensors from the peak memory snapshot for specified device(s).
+
+        Args:
+            device_id (optional): Specific device (e.g., torch.device('cuda:0')) to log the snapshot for.
+                                  If None, logs snapshots for all devices that have one.
+            min_memory_mb (float): Minimum memory size (in MB) for a tensor to be included in the report.
+                                   Defaults to 0 (show all).
+        """
+        devices_to_log = []
+        if device_id is not None:
+            if device_id in self.peak_memory_snapshot_per_device:
+                devices_to_log.append(device_id)
+            else:
+                self.logger.info(f"No peak memory snapshot found for device {device_id}.")
+                return
+        else:
+            devices_to_log = list(self.peak_memory_snapshot_per_device.keys())
+
+        if not devices_to_log:
+            self.logger.info("No peak memory snapshots available to log.")
+            return
+
+        min_memory_bytes = min_memory_mb * (1024**2)
+
+        for dev_id in devices_to_log:
+            snapshot_tensors_info = []
+            total_snapshot_memory = 0
+            
+            device_snapshot = self.peak_memory_snapshot_per_device.get(dev_id, {})
+            if not device_snapshot:
+                self.logger.info(f"Peak memory snapshot for device {dev_id} is empty or not found.")
+                continue
+
+            # Iterate through the snapshot items
+            for storage_key, info in device_snapshot.items():
+                # storage_key is the original storage, but info is a copy
+                # We assume info dict contains all necessary details like 'size', 'shape', 'module', 'phase'
+                snapshot_tensors_info.append({
+                    "size": info["size"],
+                    "shape": info["shape"],
+                    "module": info["module"],
+                    "phase": info.get("phase", "N/A") # Ensure phase is present
+                })
+                total_snapshot_memory += info["size"]
+
+            # Filter by minimum memory size
+            filtered_snapshot_info = [
+                info for info in snapshot_tensors_info if info["size"] >= min_memory_bytes
+            ]
+
+            # Sort by size descending
+            filtered_snapshot_info.sort(key=lambda x: x["size"], reverse=True)
+
+            # Format and log the table
+            rows = []
+            for info in filtered_snapshot_info:
+                module_str = ".".join(info['module'].split('.')[-5:])
+                phase_str = info['phase'][:18] + '..' if len(info['phase']) > 20 else info['phase']
+                size_mb = info['size'] / (1024**2)
+                shape_str = str(info['shape'])
+                rows.append([phase_str, module_str, f"{size_mb:.2f}", shape_str])
+            
+            log_title = f"Peak Memory Snapshot for Device {dev_id} (Min Size: {min_memory_mb} MB, Peak: {self.peak_memory_per_device.get(dev_id, 0)/(1024**2):.2f} MB):"
+            log_memory_table(
+                self.logger,
+                log_title,
+                ["Phase", "Module", "Size (MB)", "Shape"],
+                rows
+            )
+            
+            total_snapshot_mb = total_snapshot_memory / (1024**2)
+            self.logger.info(f"Total Memory in Snapshot for {dev_id}: {total_snapshot_mb:.2f} MB")
 
     @contextlib.contextmanager
     def trace_module(self, name):

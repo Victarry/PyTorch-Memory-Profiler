@@ -263,6 +263,7 @@ def estimated_main(args, model_provider_func):
         estimator.print_memory_stats()
         # Remove hooks
         estimator.memory_dispatch_mode.remove_hooks(hook_handles)
+        estimator.memory_dispatch_mode.log_peak_memory_snapshot()
 
 
 def parse_args():
