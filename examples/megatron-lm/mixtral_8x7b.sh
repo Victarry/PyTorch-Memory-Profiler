@@ -4,9 +4,9 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 # Parallel setting configuration
 TP=${TP:-1}
-PP=${PP:-1}
-EP=${EP:-1}
-VPP=${VPP:-1}
+PP=${PP:-4}
+EP=${EP:-8}
+VPP=${VPP:-8}
 MBS=${MBS:-1}
 GBS=${GBS:-256}
 
@@ -14,7 +14,7 @@ num_layers_per_vpp=$((32 / PP / VPP))
 
 export MEMORY_PROFILER_LOG_LEVEL=20  # INFO level
 
-export WORLD_SIZE=${WORLD_SIZE:-1}
+export WORLD_SIZE=${WORLD_SIZE:-64}
 export RANK=${RANK:-0}
 
 extra_args=""

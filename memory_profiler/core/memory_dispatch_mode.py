@@ -96,6 +96,9 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         # Stores {storage: {'size': nbytes, 'shape': shape, 'module': module_path}}
         self.live_tensors = weakref.WeakKeyDictionary()
 
+        # New: track release stack traces for peak memory snapshot tensors
+        self.peak_memory_tensor_release_info = {} # Stores {tensor_id: {'release_stack_trace': trace}}
+
         self.module_memory_usage = defaultdict(lambda: defaultdict(int))
 
         self.phase_tensor_modules = defaultdict(list)
@@ -214,6 +217,9 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
 
         self.current_memory_per_device[device_id] += nbytes
         
+        # Generate a unique ID for this tensor
+        tensor_id = id(storage)
+        
         # Check if current memory exceeds peak memory for this device
         if self.current_memory_per_device[device_id] > self.peak_memory_per_device[device_id]:
             self.peak_memory_per_device[device_id] = self.current_memory_per_device[device_id]
@@ -223,7 +229,9 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             for _storage, info in list(self.live_tensors.items()):
                 if info.get("device") == device_id: # Only tensors on the current device
                     # Create a copy of the info dict to avoid modifying the live_tensors entry
-                    current_snapshot_list.append(info.copy()) 
+                    info_copy = info.copy()
+                    info_copy["tensor_id"] = id(_storage)  # Add unique ID for later matching
+                    current_snapshot_list.append(info_copy) 
             self.peak_memory_snapshot_per_device[device_id] = current_snapshot_list
 
         # Update module memory usage statistics
@@ -236,7 +244,8 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             "module": module_path,
             "device": device_id, # Store device for release
             "phase": self.current_phase, # Store creation phase
-            "stack_trace": current_stack_trace # Store stack trace
+            "stack_trace": current_stack_trace, # Store stack trace
+            "tensor_id": tensor_id  # Add unique ID
         }
 
         # # --- Patch storage.resize_ to intercept manual release --- 
@@ -248,7 +257,7 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         # --- End Patch ---
         weakref.finalize(
             storage,
-            functools.partial(self.release_memory, device_id, nbytes),
+            functools.partial(self.release_memory, device_id, nbytes, tensor_id),
         )
         # Record which phase the tensor was created in, and which module it belongs to
         self.phase_tensor_modules[self.current_phase].append(
@@ -267,8 +276,17 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
             return "Unknown"
         return self._internal_module_stack[-1]
 
-    def release_memory(self, device_id, nbytes):
+    def release_memory(self, device_id, nbytes, tensor_id=None):
         """Helper method to decrease memory count - called by finalize or patched resize_(0)."""
+        # Capture stack trace at release time
+        release_stack_trace = traceback.format_stack()
+        
+        if tensor_id is not None:
+            # Store the release stack trace for this tensor
+            self.peak_memory_tensor_release_info[tensor_id] = {
+                "release_stack_trace": release_stack_trace
+            }
+            
         if device_id in self.current_memory_per_device:
              self.current_memory_per_device[device_id] -= nbytes
         # Entry in self.live_tensors is removed automatically by WeakKeyDictionary
@@ -501,6 +519,12 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
 
             for info_item in device_snapshot_list:
                 if info_item["size"] >= min_memory_bytes:
+                    # Get release stack trace if available
+                    tensor_id = info_item.get("tensor_id")
+                    release_info = {}
+                    if tensor_id is not None and tensor_id in self.peak_memory_tensor_release_info:
+                        release_info = self.peak_memory_tensor_release_info[tensor_id]
+                    
                     # Prepare info for JSON serialization
                     serializable_info = {
                         "size_bytes": info_item["size"],
@@ -508,7 +532,8 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
                         "shape": str(info_item["shape"]), # Convert torch.Size to string
                         "module": info_item["module"],
                         "phase": info_item.get("phase", "N/A"),
-                        "stack_trace": info_item.get("stack_trace", []) # Include stack trace
+                        "create_stack_trace": info_item.get("stack_trace", []), # Include creation stack trace
+                        "release_stack_trace": release_info.get("release_stack_trace", []) # Include release stack trace if available
                     }
                     snapshot_tensors_info.append(serializable_info)
             
