@@ -10,6 +10,9 @@ import sys
 import argparse
 from typing import Dict, List, Any, Tuple, Set, Optional
 
+# Disable Streamlit file watcher to avoid "inotify watch limit reached" error
+os.environ['STREAMLIT_SERVER_FILE_WATCHER_TYPE'] = 'none'
+
 def load_memory_snapshot(file_path: str) -> Dict:
     """Load memory snapshot from JSON file."""
     with open(file_path, 'r') as f:
@@ -19,23 +22,79 @@ def extract_module_hierarchy(module_path: str) -> List[str]:
     """Extract module hierarchy components from a module path."""
     return module_path.split('.')
 
+def normalize_module_path(module_path: str) -> str:
+    """Normalize a module path by replacing numeric indices with placeholders."""
+    # Split the path by dots
+    components = module_path.split('.')
+    
+    # Replace numeric components with '*'
+    normalized_components = []
+    for component in components:
+        if component.isdigit():
+            normalized_components.append('*')
+        else:
+            normalized_components.append(component)
+    
+    # Join the components back with dots
+    normalized_path = '.'.join(normalized_components)
+    
+    return normalized_path
+
 def build_module_tree(tensors: List[Dict]) -> Dict:
     """Build a hierarchical tree of modules from tensor data."""
     tree = {}
+    merged_paths = defaultdict(list)
+    
+    # First, group tensors by normalized paths
     for tensor in tensors:
         module_path = tensor.get('module', 'Unknown')
         if not module_path or module_path == 'Unknown':
             continue
-            
-        components = extract_module_hierarchy(module_path)
-        current = tree
-        for component in components:
-            if component not in current:
-                current[component] = {'_tensors': [], '_size': 0}
-            current = current[component]
         
-        current['_tensors'].append(tensor)
-        current['_size'] += tensor.get('size_bytes', 0)
+        # Normalize the path for merging similar modules
+        normalized_path = normalize_module_path(module_path)
+        merged_paths[normalized_path].append(tensor)
+    
+    # Now build the tree using the normalized paths
+    for normalized_path, path_tensors in merged_paths.items():
+        # Get the original first path to extract components
+        # We'll use the normalized path for display but components for hierarchy
+        sample_path = path_tensors[0].get('module', 'Unknown')
+        components = extract_module_hierarchy(sample_path)
+        
+        # Calculate total size of all tensors in this merged group
+        total_size = sum(tensor.get('size_bytes', 0) for tensor in path_tensors)
+        tensor_count = len(path_tensors)
+        
+        # Identify the pattern in the original path
+        pattern = sample_path
+        if len(path_tensors) > 1:  # If we have multiple tensors, it's a merged group
+            # Use the normalized path directly as it now uses '*' for numeric components
+            pattern = normalized_path
+        
+        # Add a custom property to the first tensor to mark it as merged with count info
+        if len(path_tensors) > 1:
+            path_tensors[0]['_merged'] = True
+            path_tensors[0]['_merged_count'] = tensor_count
+            path_tensors[0]['_merged_pattern'] = pattern
+        
+        # Now build tree structure
+        current = tree
+        for i, component in enumerate(components):
+            # Replace numeric component with a pattern indicator in the tree
+            is_numeric = component.isdigit()
+            tree_key = component
+            
+            # Create or get the node
+            if tree_key not in current:
+                current[tree_key] = {'_tensors': [], '_size': 0, '_pattern': None}
+            
+            current = current[tree_key]
+        
+        # Store tensors and size in the leaf node
+        current['_tensors'].extend(path_tensors)
+        current['_size'] = total_size
+        current['_pattern'] = pattern
     
     return tree
 
@@ -85,11 +144,20 @@ def create_module_tree_chart(device_data: Dict) -> None:
     
     def flatten_tree(tree, prefix="", depth=0):
         for key, value in sorted(tree.items(), key=lambda x: x[0]):
-            if key == '_tensors' or key == '_size':
+            if key == '_tensors' or key == '_size' or key == '_pattern':
                 continue
                 
             size = format_bytes(value.get('_size', 0))
-            node_name = f"{'  ' * depth}📂 {key} - {size}"
+            full_path = f"{prefix}.{key}" if prefix else key
+            
+            # Check if this is a merged pattern node
+            pattern = value.get('_pattern')
+            if pattern and '*' in pattern:
+                node_name = f"{'  ' * depth}📂 {key} - {size} [Merged Pattern]"
+                display_path = pattern
+            else:
+                node_name = f"{'  ' * depth}📂 {key} - {size}"
+                display_path = full_path
             
             # Store node info
             flattened_nodes.append({
@@ -98,11 +166,12 @@ def create_module_tree_chart(device_data: Dict) -> None:
                 "size_bytes": value.get('_size', 0),
                 "size_formatted": size,
                 "tensors": value.get('_tensors', []),
-                "full_path": f"{prefix}.{key}" if prefix else key
+                "full_path": full_path,
+                "display_path": display_path
             })
             
             # Recursively process children
-            new_prefix = f"{prefix}.{key}" if prefix else key
+            new_prefix = full_path
             flatten_tree(value, new_prefix, depth + 1)
     
     # Generate the flattened representation
@@ -110,13 +179,22 @@ def create_module_tree_chart(device_data: Dict) -> None:
     
     # Display each module as a separate expander (not nested)
     for node in flattened_nodes:
-        expander = st.expander(node["name"])
+        expander = st.expander(f"{node['name']} (Path: {node['display_path']})")
         with expander:
             if node["tensors"]:
+                # Check for merged tensors
+                merged_info = ""
+                sample_tensor = node["tensors"][0] if node["tensors"] else None
+                if sample_tensor and sample_tensor.get('_merged', False):
+                    merged_count = sample_tensor.get('_merged_count', 0)
+                    merged_pattern = sample_tensor.get('_merged_pattern', '')
+                    merged_info = f"⚠️ This represents {merged_count} similar modules matching pattern: {merged_pattern}"
+                    st.info(merged_info)
+                
                 t_df = pd.DataFrame([{
                     'Size': format_bytes(t.get('size_bytes', 0)),
                     'Shape': t.get('shape', 'Unknown'),
-                    'Module': t.get('module', 'Unknown').split('.')[-1]
+                    'Module': t.get('module', 'Unknown')  # Show full module path
                 } for t in node["tensors"]])
                 
                 if not t_df.empty:
@@ -219,27 +297,32 @@ def display_stack_trace_groups(tensors: List[Dict]) -> None:
             tensor_df = pd.DataFrame(tensor_data)
             st.dataframe(tensor_df, hide_index=True)
 
-def main():
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="PyTorch Memory Profiler Visualizer")
-    parser.add_argument("--file", "-f", type=str, help="Path to memory snapshot JSON file")
-    
-    # Extract args from sys.argv, excluding Streamlit's own arguments
-    streamlit_args = []
+# Process command-line arguments before Streamlit runs
+@st.cache_data
+def parse_command_line_args():
+    """Parse command-line arguments without modifying sys.argv"""
+    # Look for our custom arguments without disturbing sys.argv
     file_arg = None
-    
     i = 1
     while i < len(sys.argv):
         if sys.argv[i] in ["--file", "-f"] and i + 1 < len(sys.argv):
             file_arg = sys.argv[i + 1]
-            i += 2
-        else:
-            streamlit_args.append(sys.argv[i])
-            i += 1
+            break
+        i += 1
     
-    # Override sys.argv for Streamlit
-    sys.argv = [sys.argv[0]] + streamlit_args
-    
+    return file_arg
+
+# Load JSON snapshot file
+def load_snapshot_from_file(file_path):
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            st.error(f"Failed to load file: {e}")
+    return None
+
+def main():
     st.set_page_config(
         page_title="PyTorch Memory Visualizer",
         page_icon="📊",
@@ -249,25 +332,34 @@ def main():
     
     st.title("PyTorch Memory Profiler Visualizer")
     
-    # Load snapshot from CLI argument if provided
-    snapshot_data = None
-    if file_arg and os.path.exists(file_arg):
-        try:
-            with open(file_arg, 'r') as f:
-                snapshot_data = json.load(f)
+    # Get command-line argument
+    file_arg = parse_command_line_args()
+    
+    # Initialize session state for snapshot data if not present
+    if 'snapshot_data' not in st.session_state:
+        st.session_state.snapshot_data = None
+    
+    # Try to load from command-line argument first
+    if file_arg and (st.session_state.snapshot_data is None):
+        snapshot_data = load_snapshot_from_file(file_arg)
+        if snapshot_data:
             st.success(f"Loaded memory snapshot from: {file_arg}")
-        except Exception as e:
-            st.error(f"Failed to load file: {e}")
+            st.session_state.snapshot_data = snapshot_data
     
-    # Fallback to file uploader if no valid file from CLI
-    if snapshot_data is None:
-        uploaded_file = st.file_uploader("Upload a memory snapshot JSON file", type=['json'])
-        if uploaded_file is not None:
-            # Load the snapshot data
+    # Handle file uploader
+    uploaded_file = st.file_uploader("Upload a memory snapshot JSON file", type=['json'])
+    if uploaded_file is not None:
+        try:
+            # Load the snapshot data from uploaded file
             snapshot_data = json.load(uploaded_file)
+            st.session_state.snapshot_data = snapshot_data
+        except Exception as e:
+            st.error(f"Error loading uploaded file: {e}")
     
-    # Process the snapshot data if available
-    if snapshot_data is not None:
+    # Process snapshot data if available
+    if st.session_state.snapshot_data:
+        snapshot_data = st.session_state.snapshot_data
+        
         # Show device selection if multiple devices
         devices = list(snapshot_data.keys())
         

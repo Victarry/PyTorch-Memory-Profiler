@@ -1,6 +1,6 @@
 export MEGATRON_PATH=/workspace/megatron-lm
 export PYTHONPATH=$MEGATRON_PATH:/workspace/pytorch-memory-tracing:$PYTHONPATH
-# export CUDA_DEVICE_MAX_CONNECTIONS=1
+export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 # Preliminary parallel setting TP2EP8PP4
 # number of params: 235B
@@ -12,10 +12,10 @@ export PYTHONPATH=$MEGATRON_PATH:/workspace/pytorch-memory-tracing:$PYTHONPATH
 
 # TP1EP8ZP32
 
-TP=${TP:-1}
-EP=${EP:-8}
-PP=${PP:-1}
-VPP=${VPP:-1}
+TP=${TP:-2}
+EP=${EP:-32}
+PP=${PP:-8}
+VPP=${VPP:-4}
 MBS=${MBS:-1}
 GBS=${GBS:-2048}
 
@@ -121,5 +121,6 @@ python $MEGATRON_PATH/pretrain_gpt.py \
     --account-for-loss-in-pipeline-split \
     $extra_args \
     --memory-tracing \
+    --save-peak-memory-snapshot qwen3_235b_TP${TP}_PP${PP}_EP${EP}_VPP${VPP}.json \
     --recompute-granularity selective \
     --recompute-modules moe_act layernorm
