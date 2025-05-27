@@ -210,18 +210,63 @@ def create_module_tree_chart(device_data: Dict) -> None:
         )
         st.plotly_chart(fig, use_container_width=True)
         
-        # Display the merged module data in a table
+        # Display the merged module data in a table with selection
         st.subheader("Merged Module Patterns - Table View")
-        st.dataframe(
-            merged_df[['Pattern', 'Size (Formatted)', 'Size (Bytes)']].rename(
-                columns={'Pattern': 'Module Pattern', 'Size (Formatted)': 'Memory Usage'}
-            ),
-            hide_index=True, 
+        
+        # Create a data editor with selection enabled
+        display_df = merged_df[['Pattern', 'Size (Formatted)', 'Size (Bytes)']].rename(
+            columns={'Pattern': 'Module Pattern', 'Size (Formatted)': 'Memory Usage'}
+        ).reset_index(drop=True)
+        
+        # Add a selection column
+        display_df.insert(0, 'Select', False)
+        
+        edited_df = st.data_editor(
+            display_df,
+            hide_index=True,
             use_container_width=True,
             column_config={
-                "Size (Bytes)": None # Hide the raw bytes column from display but keep for sorting
-            }
+                "Select": st.column_config.CheckboxColumn(
+                    "Select",
+                    help="Select rows to calculate total memory",
+                    default=False,
+                ),
+                "Size (Bytes)": None,  # Hide the raw bytes column from display but keep for calculation
+                "Module Pattern": st.column_config.TextColumn(
+                    "Module Pattern",
+                    help="Module pattern with merged components",
+                    disabled=True,
+                ),
+                "Memory Usage": st.column_config.TextColumn(
+                    "Memory Usage", 
+                    help="Formatted memory usage",
+                    disabled=True,
+                )
+            },
+            key="merged_patterns_table"
         )
+        
+        # Calculate and display total memory for selected rows
+        selected_rows = edited_df[edited_df['Select'] == True]
+        if not selected_rows.empty:
+            total_selected_bytes = selected_rows['Size (Bytes)'].sum()
+            total_selected_formatted = format_bytes(total_selected_bytes)
+            
+            # Display the total in a prominent way
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                st.metric(
+                    label=f"Total Memory for {len(selected_rows)} Selected Patterns",
+                    value=total_selected_formatted,
+                    help=f"Sum of {len(selected_rows)} selected module patterns"
+                )
+            
+            # Show details of selected patterns
+            with st.expander(f"Details of {len(selected_rows)} Selected Patterns"):
+                selected_details = selected_rows[['Module Pattern', 'Memory Usage']].copy()
+                st.dataframe(selected_details, hide_index=True, use_container_width=True)
+        else:
+            st.info("💡 Select one or more patterns above to see the total memory usage")
     # --- End new code ---
     
     # Display each module as a separate expander (not nested)
