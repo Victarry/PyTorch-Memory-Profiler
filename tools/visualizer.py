@@ -43,14 +43,52 @@ def normalize_module_path(module_path: str) -> str:
 def build_module_tree(tensors: List[Dict]) -> Dict:
     """Build a hierarchical tree of modules from tensor data."""
     tree = {}
+    
+    # Special grouping for specific phases
+    special_groups = {
+        'setup_model_and_optimizer': [],
+        'optimizer_step_iter_0': [],
+        'forward_backward_unknown': []  # For Unknown modules in forward_backward_iter_0 and forward_backward_iter_1
+    }
+    
+    # Regular tensors for normal tree building
+    regular_tensors = []
+    
+    # First pass: separate special groups from regular tensors
+    for tensor in tensors:
+        phase = tensor.get('phase', '')
+        module_path = tensor.get('module', 'Unknown')
+        
+        # Check for special phase groupings
+        if phase == 'setup_model_and_optimizer':
+            special_groups['setup_model_and_optimizer'].append(tensor)
+        elif phase == 'optimizer_step_iter_0':
+            special_groups['optimizer_step_iter_0'].append(tensor)
+        elif (phase in ['forward_backward_iter_0', 'forward_backward_iter_1'] and 
+              (module_path == 'Unknown' or not module_path)):
+            special_groups['forward_backward_unknown'].append(tensor)
+        else:
+            # Regular tensor, process normally
+            if module_path and module_path != 'Unknown':
+                regular_tensors.append(tensor)
+    
+    # Add special groups to the tree at the root level
+    for group_name, group_tensors in special_groups.items():
+        if group_tensors:
+            total_size = sum(t.get('size_bytes', 0) for t in group_tensors)
+            tree[group_name] = {
+                '_tensors': group_tensors,
+                '_size': total_size,
+                '_pattern': group_name,
+                '_special_group': True  # Mark as special group
+            }
+    
+    # Process regular tensors with the original logic
     merged_paths = defaultdict(list)
     
-    # First, group tensors by normalized paths
-    for tensor in tensors:
+    # Group regular tensors by normalized paths
+    for tensor in regular_tensors:
         module_path = tensor.get('module', 'Unknown')
-        if not module_path or module_path == 'Unknown':
-            continue
-        
         # Normalize the path for merging similar modules
         normalized_path = normalize_module_path(module_path)
         merged_paths[normalized_path].append(tensor)
@@ -58,7 +96,6 @@ def build_module_tree(tensors: List[Dict]) -> Dict:
     # Now build the tree using the normalized paths
     for normalized_path, path_tensors in merged_paths.items():
         # Get the original first path to extract components
-        # We'll use the normalized path for display but components for hierarchy
         sample_path = path_tensors[0].get('module', 'Unknown')
         components = extract_module_hierarchy(sample_path)
         
@@ -132,168 +169,14 @@ def format_bytes(size_bytes: float) -> str:
     else:
         return f"{size_bytes/1024**3:.2f} GB"
 
-def create_module_tree_chart(device_data: Dict) -> None:
-    """Create and display a tree chart for module hierarchy."""
-    tensors = device_data.get('tensors', [])
+def create_module_tree_chart(device_data: Dict, tensors: List[Dict]) -> None:
+    """Create and display a tree chart for module hierarchy with phase breakdown."""
     module_tree = build_module_tree(tensors)
     
-    st.header("Module Hierarchy")
-
-    # Flatten the tree for display
-    flattened_nodes = []
+    # First, show the phase breakdown
+    st.header("Memory Analysis")
     
-    def flatten_tree(tree, prefix="", depth=0):
-        for key, value in sorted(tree.items(), key=lambda x: x[0]):
-            if key == '_tensors' or key == '_size' or key == '_pattern':
-                continue
-                
-            size = format_bytes(value.get('_size', 0))
-            full_path = f"{prefix}.{key}" if prefix else key
-            
-            # Check if this is a merged pattern node
-            pattern = value.get('_pattern')
-            if pattern and '*' in pattern:
-                node_name = f"{'  ' * depth}📂 {key} - {size} [Merged Pattern]"
-                display_path = pattern
-            else:
-                node_name = f"{'  ' * depth}📂 {key} - {size}"
-                display_path = full_path
-            
-            # Store node info
-            flattened_nodes.append({
-                "name": node_name,
-                "depth": depth,
-                "size_bytes": value.get('_size', 0),
-                "size_formatted": size,
-                "tensors": value.get('_tensors', []),
-                "full_path": full_path,
-                "display_path": display_path
-            })
-            
-            # Recursively process children
-            new_prefix = full_path
-            flatten_tree(value, new_prefix, depth + 1)
-    
-    # Generate the flattened representation
-    flatten_tree(module_tree)
-
-    # Calculate total memory from flattened_nodes
-    total_module_tree_memory = sum(node['size_bytes'] for node in flattened_nodes)
-    st.metric(label="Total Memory in Module Tree", value=format_bytes(total_module_tree_memory))
-    
-    # --- New code for merged modules chart ---
-    merged_module_data = []
-    for node in flattened_nodes:
-        # A node represents a merged pattern if its display_path (derived from pattern) contains '*'
-        # and it's not a leaf tensor group itself.
-        # The node['display_path'] is the key, as it's set to the pattern path if merged.
-        if '*' in node['display_path']:
-            merged_module_data.append({
-                'Pattern': node['display_path'], 
-                'Size (Bytes)': node['size_bytes'],
-                'Size (Formatted)': node['size_formatted']
-            })
-
-    if merged_module_data:
-        merged_df = pd.DataFrame(merged_module_data)
-        # Sort by size for better visualization
-        merged_df = merged_df.sort_values('Size (Bytes)', ascending=False)
-
-        st.subheader("Memory Usage by Merged Module Patterns")
-        fig = px.bar(
-            merged_df,
-            x='Pattern',
-            y='Size (Bytes)',
-            title='Memory Usage by Merged Module Patterns',
-            labels={'Size (Bytes)': 'Memory Usage (bytes)', 'Pattern': 'Module Pattern'},
-            hover_data=['Size (Formatted)']
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Display the merged module data in a table with selection
-        st.subheader("Merged Module Patterns - Table View")
-        
-        # Create a data editor with selection enabled
-        display_df = merged_df[['Pattern', 'Size (Formatted)', 'Size (Bytes)']].rename(
-            columns={'Pattern': 'Module Pattern', 'Size (Formatted)': 'Memory Usage'}
-        ).reset_index(drop=True)
-        
-        # Add a selection column
-        display_df.insert(0, 'Select', False)
-        
-        edited_df = st.data_editor(
-            display_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Select": st.column_config.CheckboxColumn(
-                    "Select",
-                    help="Select rows to calculate total memory",
-                    default=False,
-                ),
-                "Size (Bytes)": None,  # Hide the raw bytes column from display but keep for calculation
-                "Module Pattern": st.column_config.TextColumn(
-                    "Module Pattern",
-                    help="Module pattern with merged components",
-                    disabled=True,
-                ),
-                "Memory Usage": st.column_config.TextColumn(
-                    "Memory Usage", 
-                    help="Formatted memory usage",
-                    disabled=True,
-                )
-            },
-            key="merged_patterns_table"
-        )
-        
-        # Calculate and display total memory for selected rows
-        selected_rows = edited_df[edited_df['Select'] == True]
-        if not selected_rows.empty:
-            total_selected_bytes = selected_rows['Size (Bytes)'].sum()
-            total_selected_formatted = format_bytes(total_selected_bytes)
-            
-            # Display the total in a prominent way
-            col1, col2, col3 = st.columns([1, 2, 1])
-            with col2:
-                st.metric(
-                    label=f"Total Memory for {len(selected_rows)} Selected Patterns",
-                    value=total_selected_formatted,
-                    help=f"Sum of {len(selected_rows)} selected module patterns"
-                )
-            
-            # Show details of selected patterns
-            with st.expander(f"Details of {len(selected_rows)} Selected Patterns"):
-                selected_details = selected_rows[['Module Pattern', 'Memory Usage']].copy()
-                st.dataframe(selected_details, hide_index=True, use_container_width=True)
-        else:
-            st.info("💡 Select one or more patterns above to see the total memory usage")
-    # --- End new code ---
-    
-    # Display each module as a separate expander (not nested)
-    for node in flattened_nodes:
-        expander = st.expander(f"{node['name']} (Path: {node['display_path']})")
-        with expander:
-            if node["tensors"]:
-                # Check for merged tensors
-                merged_info = ""
-                sample_tensor = node["tensors"][0] if node["tensors"] else None
-                if sample_tensor and sample_tensor.get('_merged', False):
-                    merged_count = sample_tensor.get('_merged_count', 0)
-                    merged_pattern = sample_tensor.get('_merged_pattern', '')
-                    merged_info = f"⚠️ This represents {merged_count} similar modules matching pattern: {merged_pattern}"
-                    st.info(merged_info)
-                
-                t_df = pd.DataFrame([{
-                    'Size': format_bytes(t.get('size_bytes', 0)),
-                    'Shape': t.get('shape', 'Unknown'),
-                    'Module': t.get('module', 'Unknown')  # Show full module path
-                } for t in node["tensors"]])
-                
-                if not t_df.empty:
-                    st.dataframe(t_df)
-
-def create_phase_breakdown(tensors: List[Dict]) -> None:
-    """Create and display a breakdown of tensors by phase."""
+    # Create phase breakdown chart
     phase_groups = group_by_phase(tensors)
     
     # Create DataFrame for phase breakdown
@@ -340,49 +223,358 @@ def create_phase_breakdown(tensors: List[Dict]) -> None:
         )
         
         st.plotly_chart(fig, use_container_width=True)
+    
+    st.divider()
+    
+    # Now show the module hierarchy
+    st.header("Module Hierarchy")
 
-def display_tensor_details(tensors: List[Dict], min_size_mb: float = 0) -> None:
-    """Display detailed information about tensors."""
-    min_bytes = min_size_mb * 1024 * 1024
-    filtered_tensors = [t for t in tensors if t.get('size_bytes', 0) >= min_bytes]
+    # Flatten the tree for display
+    flattened_nodes = []
     
-    if not filtered_tensors:
-        st.warning(f"No tensors found with size >= {min_size_mb} MB")
-        return
+    def flatten_tree(tree, prefix="", depth=0):
+        for key, value in sorted(tree.items(), key=lambda x: x[0]):
+            if key == '_tensors' or key == '_size' or key == '_pattern' or key == '_special_group':
+                continue
+                
+            size = format_bytes(value.get('_size', 0))
+            full_path = f"{prefix}.{key}" if prefix else key
+            
+            # Check if this is a special group
+            is_special_group = value.get('_special_group', False)
+            
+            # Format the node name based on type
+            if is_special_group:
+                # Special formatting for phase-based groups
+                if key == 'setup_model_and_optimizer':
+                    display_name = "Setup Model & Optimizer (All Tensors)"
+                elif key == 'optimizer_step_iter_0':
+                    display_name = "Optimizer Step Iter 0 (All Tensors)"
+                elif key == 'forward_backward_unknown':
+                    display_name = "Forward/Backward Unknown Tensors"
+                else:
+                    display_name = key
+                
+                node_name = f"{'  ' * depth}🔥 {display_name} - {size}"
+                display_path = key
+            else:
+                # Check if this is a merged pattern node
+                pattern = value.get('_pattern')
+                if pattern and '*' in pattern:
+                    node_name = f"{'  ' * depth}📂 {key} - {size} [Merged Pattern]"
+                    display_path = pattern
+                else:
+                    node_name = f"{'  ' * depth}📂 {key} - {size}"
+                    display_path = full_path
+            
+            # Store node info
+            flattened_nodes.append({
+                "name": node_name,
+                "depth": depth,
+                "size_bytes": value.get('_size', 0),
+                "size_formatted": size,
+                "tensors": value.get('_tensors', []),
+                "full_path": full_path,
+                "display_path": display_path,
+                "is_special_group": is_special_group
+            })
+            
+            # Recursively process children (only if not a special group)
+            if not is_special_group:
+                new_prefix = full_path
+                flatten_tree(value, new_prefix, depth + 1)
     
-    tensor_data = []
-    for tensor in filtered_tensors:
-        # Process creation stack trace to show 10 lines from last megatron/core/*.py
-        stack_trace = tensor.get('create_stack_trace', [])
-        processed_stack = []
+    # Generate the flattened representation
+    flatten_tree(module_tree)
+
+    # Calculate total memory from flattened_nodes
+    total_module_tree_memory = sum(node['size_bytes'] for node in flattened_nodes)
+    st.metric(label="Total Memory in Module Tree", value=format_bytes(total_module_tree_memory))
+    
+    # --- New code for merged modules chart ---
+    merged_module_data = []
+    for node in flattened_nodes:
+        # Include both merged patterns and special groups
+        if '*' in node['display_path'] or node.get('is_special_group', False):
+            # Format the pattern name for special groups
+            if node.get('is_special_group', False):
+                if node['display_path'] == 'setup_model_and_optimizer':
+                    pattern_name = "Setup Model & Optimizer (All Tensors)"
+                elif node['display_path'] == 'optimizer_step_iter_0':
+                    pattern_name = "Optimizer Step Iter 0 (All Tensors)"
+                elif node['display_path'] == 'forward_backward_unknown':
+                    pattern_name = "Forward/Backward Unknown Tensors"
+                else:
+                    pattern_name = node['display_path']
+            else:
+                pattern_name = node['display_path']
+            
+            merged_module_data.append({
+                'Pattern': pattern_name, 
+                'Size (Bytes)': node['size_bytes'],
+                'Size (Formatted)': node['size_formatted'],
+                'Is Special Group': node.get('is_special_group', False)
+            })
+
+    if merged_module_data:
+        merged_df = pd.DataFrame(merged_module_data)
+        # Sort by size for better visualization
+        merged_df = merged_df.sort_values('Size (Bytes)', ascending=False)
+
+        st.subheader("Memory Usage by Module Groups")
         
-        # Find the last line containing megatron/core/*.py
-        last_megatron_idx = -1
-        for i in range(len(stack_trace) - 1, -1, -1):
-            if 'megatron/core/' in stack_trace[i] and '.py' in stack_trace[i]:
-                last_megatron_idx = i
-                break
+        # Create color mapping for special groups vs regular patterns
+        color_map = {True: '#FF6B6B', False: '#4ECDC4'}  # Red for special groups, teal for patterns
+        merged_df['Color'] = merged_df['Is Special Group'].map(color_map)
         
-        # If found, get 10 lines from that point upward
-        if last_megatron_idx >= 0:
-            start_idx = max(0, last_megatron_idx - 9)  # 10 lines total (including the megatron line)
-            processed_stack = stack_trace[start_idx:last_megatron_idx + 1]
+        fig = px.bar(
+            merged_df,
+            x='Pattern',
+            y='Size (Bytes)',
+            title='Memory Usage by Module Groups and Patterns',
+            labels={'Size (Bytes)': 'Memory Usage (bytes)', 'Pattern': 'Module/Group'},
+            hover_data=['Size (Formatted)'],
+            color='Is Special Group',
+            color_discrete_map={True: '#FF6B6B', False: '#4ECDC4'}
+        )
+        
+        # Update layout for better readability
+        fig.update_layout(
+            xaxis_tickangle=-45,
+            height=600,
+            showlegend=True,
+            legend_title_text='Type',
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="right",
+                x=0.99
+            )
+        )
+        
+        # Update legend labels
+        fig.for_each_trace(lambda t: t.update(name='Special Group' if t.name == 'True' else 'Merged Pattern'))
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Display the merged module data in a table with selection
+        st.subheader("Module Groups and Patterns - Table View")
+        
+        # Add select all checkbox
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            select_all = st.checkbox("Select All", key="select_all_checkbox")
+        
+        # Create a data editor with selection enabled
+        display_df = merged_df[['Pattern', 'Size (Formatted)', 'Size (Bytes)', 'Is Special Group']].copy()
+        
+        # Add type indicator to the display
+        display_df['Type'] = display_df['Is Special Group'].map({True: '🔥 Special Group', False: '📂 Pattern'})
+        
+        # Select columns for display
+        display_df = display_df[['Pattern', 'Type', 'Size (Formatted)', 'Size (Bytes)']].rename(
+            columns={'Pattern': 'Module/Group', 'Size (Formatted)': 'Memory Usage'}
+        ).reset_index(drop=True)
+        
+        # Add a selection column - set initial value based on select_all
+        display_df.insert(0, 'Select', select_all)
+        
+        # Initialize session state for tracking manual edits
+        if 'prev_select_all' not in st.session_state:
+            st.session_state.prev_select_all = False
+        
+        # Check if select_all state changed
+        if select_all != st.session_state.prev_select_all:
+            st.session_state.prev_select_all = select_all
+            # Force refresh by clearing any cached state
+            if 'merged_patterns_table' in st.session_state:
+                del st.session_state['merged_patterns_table']
+        
+        edited_df = st.data_editor(
+            display_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Select": st.column_config.CheckboxColumn(
+                    "Select",
+                    help="Select rows to calculate total memory",
+                    default=select_all,
+                ),
+                "Size (Bytes)": None,  # Hide the raw bytes column from display but keep for calculation
+                "Module/Group": st.column_config.TextColumn(
+                    "Module/Group",
+                    help="Module pattern or special group",
+                    disabled=True,
+                ),
+                "Type": st.column_config.TextColumn(
+                    "Type",
+                    help="Type of grouping",
+                    disabled=True,
+                ),
+                "Memory Usage": st.column_config.TextColumn(
+                    "Memory Usage", 
+                    help="Formatted memory usage",
+                    disabled=True,
+                )
+            },
+            key="merged_patterns_table"
+        )
+        
+        # Calculate and display total memory for selected rows
+        selected_rows = edited_df[edited_df['Select'] == True]
+        if not selected_rows.empty:
+            total_selected_bytes = selected_rows['Size (Bytes)'].sum()
+            total_selected_formatted = format_bytes(total_selected_bytes)
+            
+            # Display the total in a prominent way
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                # Check if all items are selected
+                all_selected = len(selected_rows) == len(display_df)
+                if all_selected:
+                    label_text = f"Total Memory for All {len(selected_rows)} Items"
+                else:
+                    label_text = f"Total Memory for {len(selected_rows)} Selected Items"
+                
+                st.metric(
+                    label=label_text,
+                    value=total_selected_formatted,
+                    help=f"Sum of {len(selected_rows)} selected items"
+                )
+            
+            # Show details of selected patterns
+            with st.expander(f"Details of {len(selected_rows)} Selected Items"):
+                selected_details = selected_rows[['Module/Group', 'Type', 'Memory Usage']].copy()
+                st.dataframe(selected_details, hide_index=True, use_container_width=True)
         else:
-            # If no megatron/core line found, show last 10 lines
-            processed_stack = stack_trace[-10:] if len(stack_trace) > 10 else stack_trace
-        
-        tensor_data.append({
-            'Size (MB)': tensor.get('size_mb', 0),
-            'Shape': tensor.get('shape', 'Unknown'),
-            'Module': tensor.get('module', 'Unknown'),
-            'Phase': tensor.get('phase', 'Unknown'),
-            'Creation Stack': '\n'.join(processed_stack)
-        })
+            st.info("💡 Select one or more patterns above to see the total memory usage")
+    # --- End new code ---
     
-    tensor_df = pd.DataFrame(tensor_data)
-    tensor_df = tensor_df.sort_values('Size (MB)', ascending=False)
-    
-    st.dataframe(tensor_df, use_container_width=True)
+    # Display each module as a separate expander (not nested)
+    for node in flattened_nodes:
+        expander = st.expander(f"{node['name']} (Path: {node['display_path']})")
+        with expander:
+            if node["tensors"]:
+                # Special handling for phase-grouped tensors
+                if node.get('is_special_group', False):
+                    st.info(f"📊 This group contains {len(node['tensors'])} tensors from the {node['display_path']} phase")
+                    
+                    # Group tensors by module for better display
+                    module_groups = defaultdict(list)
+                    for t in node["tensors"]:
+                        module = t.get('module', 'Unknown')
+                        module_groups[module].append(t)
+                    
+                    # Display summary by module
+                    st.write(f"**Modules in this group:** {len(module_groups)}")
+                    
+                    # Create detailed dataframe with all tensor information
+                    tensor_details = []
+                    for t in node["tensors"]:
+                        # Process creation stack trace to show relevant portion
+                        stack_trace = t.get('create_stack_trace', [])
+                        processed_stack = []
+                        
+                        # Find the last line containing megatron/core/*.py
+                        last_megatron_idx = -1
+                        for i in range(len(stack_trace) - 1, -1, -1):
+                            if 'megatron/core/' in stack_trace[i] and '.py' in stack_trace[i]:
+                                last_megatron_idx = i
+                                break
+                        
+                        # If found, get 10 lines from that point upward
+                        if last_megatron_idx >= 0:
+                            start_idx = max(0, last_megatron_idx - 9)
+                            processed_stack = stack_trace[start_idx:last_megatron_idx + 1]
+                        else:
+                            # If no megatron/core line found, show last 10 lines
+                            processed_stack = stack_trace[-10:] if len(stack_trace) > 10 else stack_trace
+                        
+                        tensor_details.append({
+                            'Size (MB)': t.get('size_mb', 0),
+                            'Size': format_bytes(t.get('size_bytes', 0)),
+                            'Shape': t.get('shape', 'Unknown'),
+                            'Module': t.get('module', 'Unknown'),
+                            'Phase': t.get('phase', 'Unknown'),
+                            'Creation Stack': '\n'.join(processed_stack)
+                        })
+                    
+                    t_df = pd.DataFrame(tensor_details)
+                    # Sort by size
+                    if 'Size (MB)' in t_df.columns:
+                        t_df = t_df.sort_values('Size (MB)', ascending=False)
+                else:
+                    # Check for merged tensors
+                    merged_info = ""
+                    sample_tensor = node["tensors"][0] if node["tensors"] else None
+                    if sample_tensor and sample_tensor.get('_merged', False):
+                        merged_count = sample_tensor.get('_merged_count', 0)
+                        merged_pattern = sample_tensor.get('_merged_pattern', '')
+                        merged_info = f"⚠️ This represents {merged_count} similar modules matching pattern: {merged_pattern}"
+                        st.info(merged_info)
+                    
+                    # Create detailed dataframe with all tensor information
+                    tensor_details = []
+                    for t in node["tensors"]:
+                        # Process creation stack trace
+                        stack_trace = t.get('create_stack_trace', [])
+                        processed_stack = []
+                        
+                        # Find the last line containing megatron/core/*.py
+                        last_megatron_idx = -1
+                        for i in range(len(stack_trace) - 1, -1, -1):
+                            if 'megatron/core/' in stack_trace[i] and '.py' in stack_trace[i]:
+                                last_megatron_idx = i
+                                break
+                        
+                        # If found, get 10 lines from that point upward
+                        if last_megatron_idx >= 0:
+                            start_idx = max(0, last_megatron_idx - 9)
+                            processed_stack = stack_trace[start_idx:last_megatron_idx + 1]
+                        else:
+                            # If no megatron/core line found, show last 10 lines
+                            processed_stack = stack_trace[-10:] if len(stack_trace) > 10 else stack_trace
+                        
+                        tensor_details.append({
+                            'Size (MB)': t.get('size_mb', 0),
+                            'Size': format_bytes(t.get('size_bytes', 0)),
+                            'Shape': t.get('shape', 'Unknown'),
+                            'Module': t.get('module', 'Unknown'),
+                            'Phase': t.get('phase', 'Unknown'),
+                            'Creation Stack': '\n'.join(processed_stack)
+                        })
+                    
+                    t_df = pd.DataFrame(tensor_details)
+                    # Sort by size
+                    if 'Size (MB)' in t_df.columns:
+                        t_df = t_df.sort_values('Size (MB)', ascending=False)
+                
+                if not t_df.empty:
+                    # Configure column display
+                    column_config = {
+                        "Size (MB)": st.column_config.NumberColumn(
+                            "Size (MB)",
+                            help="Tensor size in megabytes",
+                            format="%.2f"
+                        ),
+                        "Creation Stack": st.column_config.TextColumn(
+                            "Creation Stack",
+                            help="Stack trace from tensor creation (last 10 lines from megatron/core)",
+                            width="large"
+                        )
+                    }
+                    
+                    # Display dataframe with expandable rows for stack traces
+                    st.dataframe(
+                        t_df,
+                        column_config=column_config,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+
+
+
 
 def display_stack_trace_groups(tensors: List[Dict]) -> None:
     """Display tensors grouped by stack traces."""
@@ -498,38 +690,8 @@ def main():
         
         st.header(f"Peak Memory: {peak_memory_mb:.2f} MB on {selected_device}")
         
-        # Add a filter for minimum tensor size
-        min_size_mb = st.slider(
-            "Minimum Tensor Size (MB)", 
-            0.0, 
-            max(1.0, peak_memory_mb), 
-            1.0
-        )
-        
-        # Initialize tab state in session state
-        if 'active_tab' not in st.session_state:
-            st.session_state.active_tab = 0
-        
-        # Create tabs for different visualizations
-        tab_names = ["Phases", "Module Tree", "Tensor Details"]
-        
-        # Use columns to create custom tab selection that persists
-        cols = st.columns(len(tab_names))
-        for i, (col, tab_name) in enumerate(zip(cols, tab_names)):
-            with col:
-                if st.button(tab_name, key=f"tab_{i}", use_container_width=True, 
-                           type="primary" if st.session_state.active_tab == i else "secondary"):
-                    st.session_state.active_tab = i
-        
-        st.divider()
-        
-        # Display content based on active tab
-        if st.session_state.active_tab == 0:
-            create_phase_breakdown(tensors)
-        elif st.session_state.active_tab == 1:
-            create_module_tree_chart(device_data)
-        elif st.session_state.active_tab == 2:
-            display_tensor_details(tensors, min_size_mb)
+        # Display the module tree view with integrated phase breakdown
+        create_module_tree_chart(device_data, tensors)
 
 if __name__ == "__main__":
     main()
