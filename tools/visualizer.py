@@ -313,19 +313,33 @@ def create_phase_breakdown(tensors: List[Dict]) -> None:
         # Sort by size
         phase_df = phase_df.sort_values('Total Size (bytes)', ascending=False)
         
-        # Create bar chart
+        # Create bar chart with text annotations
         fig = px.bar(
             phase_df, 
             x='Phase', 
             y='Total Size (bytes)',
             title='Memory Usage by Phase',
             labels={'Total Size (bytes)': 'Memory Usage (bytes)'},
-            hover_data=['Tensor Count', 'Total Size']
+            hover_data=['Tensor Count', 'Total Size'],
+            text='Total Size'  # Display formatted size on bars
         )
-        st.plotly_chart(fig)
         
-        # Show detailed table
-        st.dataframe(phase_df[['Phase', 'Total Size', 'Tensor Count']], hide_index=True)
+        # Update text position and formatting
+        fig.update_traces(
+            texttemplate='%{text}',
+            textposition='outside',
+            textfont_size=12
+        )
+        
+        # Update layout for better visibility
+        fig.update_layout(
+            showlegend=False,
+            yaxis_title="Memory Usage (bytes)",
+            xaxis_title="Phase",
+            height=500
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
 
 def display_tensor_details(tensors: List[Dict], min_size_mb: float = 0) -> None:
     """Display detailed information about tensors."""
@@ -479,7 +493,7 @@ def main():
             st.session_state.active_tab = 0
         
         # Create tabs for different visualizations
-        tab_names = ["Phases", "Module Tree", "Stack Trace Groups", "Tensor Details"]
+        tab_names = ["Phases", "Module Tree", "Tensor Details"]
         
         # Use columns to create custom tab selection that persists
         cols = st.columns(len(tab_names))
@@ -497,8 +511,6 @@ def main():
         elif st.session_state.active_tab == 1:
             create_module_tree_chart(device_data)
         elif st.session_state.active_tab == 2:
-            display_stack_trace_groups(tensors)
-        elif st.session_state.active_tab == 3:
             display_tensor_details(tensors, min_size_mb)
 
 if __name__ == "__main__":
