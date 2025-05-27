@@ -474,19 +474,31 @@ def main():
             1.0
         )
         
+        # Initialize tab state in session state
+        if 'active_tab' not in st.session_state:
+            st.session_state.active_tab = 0
+        
         # Create tabs for different visualizations
-        tab1, tab2, tab3, tab4 = st.tabs(["Phases", "Module Tree", "Stack Trace Groups", "Tensor Details"])
+        tab_names = ["Phases", "Module Tree", "Stack Trace Groups", "Tensor Details"]
         
-        with tab1:
+        # Use columns to create custom tab selection that persists
+        cols = st.columns(len(tab_names))
+        for i, (col, tab_name) in enumerate(zip(cols, tab_names)):
+            with col:
+                if st.button(tab_name, key=f"tab_{i}", use_container_width=True, 
+                           type="primary" if st.session_state.active_tab == i else "secondary"):
+                    st.session_state.active_tab = i
+        
+        st.divider()
+        
+        # Display content based on active tab
+        if st.session_state.active_tab == 0:
             create_phase_breakdown(tensors)
-        
-        with tab2:
+        elif st.session_state.active_tab == 1:
             create_module_tree_chart(device_data)
-        
-        with tab3:
+        elif st.session_state.active_tab == 2:
             display_stack_trace_groups(tensors)
-        
-        with tab4:
+        elif st.session_state.active_tab == 3:
             display_tensor_details(tensors, min_size_mb)
 
 if __name__ == "__main__":
