@@ -352,13 +352,31 @@ def display_tensor_details(tensors: List[Dict], min_size_mb: float = 0) -> None:
     
     tensor_data = []
     for tensor in filtered_tensors:
+        # Process creation stack trace to show 10 lines from last megatron/core/*.py
+        stack_trace = tensor.get('create_stack_trace', [])
+        processed_stack = []
+        
+        # Find the last line containing megatron/core/*.py
+        last_megatron_idx = -1
+        for i in range(len(stack_trace) - 1, -1, -1):
+            if 'megatron/core/' in stack_trace[i] and '.py' in stack_trace[i]:
+                last_megatron_idx = i
+                break
+        
+        # If found, get 10 lines from that point upward
+        if last_megatron_idx >= 0:
+            start_idx = max(0, last_megatron_idx - 9)  # 10 lines total (including the megatron line)
+            processed_stack = stack_trace[start_idx:last_megatron_idx + 1]
+        else:
+            # If no megatron/core line found, show last 10 lines
+            processed_stack = stack_trace[-10:] if len(stack_trace) > 10 else stack_trace
+        
         tensor_data.append({
             'Size (MB)': tensor.get('size_mb', 0),
             'Shape': tensor.get('shape', 'Unknown'),
             'Module': tensor.get('module', 'Unknown'),
             'Phase': tensor.get('phase', 'Unknown'),
-            'Creation Stack': '\n'.join(tensor.get('create_stack_trace', [])[:3]),  # First 3 lines
-            'Release Stack': '\n'.join(tensor.get('release_stack_trace', [])[:3])   # First 3 lines
+            'Creation Stack': '\n'.join(processed_stack)
         })
     
     tensor_df = pd.DataFrame(tensor_data)
