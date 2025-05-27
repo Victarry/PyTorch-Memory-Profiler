@@ -90,7 +90,7 @@ def build_module_tree(tensors: List[Dict]) -> Dict:
                 current[tree_key] = {'_tensors': [], '_size': 0, '_pattern': None}
             
             current = current[tree_key]
-        
+
         # Store tensors and size in the leaf node
         current['_tensors'].extend(path_tensors)
         current['_size'] = total_size
@@ -101,14 +101,14 @@ def build_module_tree(tensors: List[Dict]) -> Dict:
 def group_by_stack_trace(tensors: List[Dict]) -> Dict[str, List[Dict]]:
     """Group tensors by their creation stack trace."""
     grouped = defaultdict(list)
-    
+
     for tensor in tensors:
         # Create a hash from the stack trace (joining all lines)
         stack_trace = tensor.get('create_stack_trace', [])
         stack_key = ''.join(stack_trace)
-        
+
         grouped[stack_key].append(tensor)
-    
+
     return grouped
 
 def group_by_phase(tensors: List[Dict]) -> Dict[str, List[Dict]]:
@@ -138,7 +138,7 @@ def create_module_tree_chart(device_data: Dict) -> None:
     module_tree = build_module_tree(tensors)
     
     st.header("Module Hierarchy")
-    
+
     # Flatten the tree for display
     flattened_nodes = []
     
@@ -176,6 +176,53 @@ def create_module_tree_chart(device_data: Dict) -> None:
     
     # Generate the flattened representation
     flatten_tree(module_tree)
+
+    # Calculate total memory from flattened_nodes
+    total_module_tree_memory = sum(node['size_bytes'] for node in flattened_nodes)
+    st.metric(label="Total Memory in Module Tree", value=format_bytes(total_module_tree_memory))
+    
+    # --- New code for merged modules chart ---
+    merged_module_data = []
+    for node in flattened_nodes:
+        # A node represents a merged pattern if its display_path (derived from pattern) contains '*'
+        # and it's not a leaf tensor group itself.
+        # The node['display_path'] is the key, as it's set to the pattern path if merged.
+        if '*' in node['display_path']:
+            merged_module_data.append({
+                'Pattern': node['display_path'], 
+                'Size (Bytes)': node['size_bytes'],
+                'Size (Formatted)': node['size_formatted']
+            })
+
+    if merged_module_data:
+        merged_df = pd.DataFrame(merged_module_data)
+        # Sort by size for better visualization
+        merged_df = merged_df.sort_values('Size (Bytes)', ascending=False)
+
+        st.subheader("Memory Usage by Merged Module Patterns")
+        fig = px.bar(
+            merged_df,
+            x='Pattern',
+            y='Size (Bytes)',
+            title='Memory Usage by Merged Module Patterns',
+            labels={'Size (Bytes)': 'Memory Usage (bytes)', 'Pattern': 'Module Pattern'},
+            hover_data=['Size (Formatted)']
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Display the merged module data in a table
+        st.subheader("Merged Module Patterns - Table View")
+        st.dataframe(
+            merged_df[['Pattern', 'Size (Formatted)', 'Size (Bytes)']].rename(
+                columns={'Pattern': 'Module Pattern', 'Size (Formatted)': 'Memory Usage'}
+            ),
+            hide_index=True, 
+            use_container_width=True,
+            column_config={
+                "Size (Bytes)": None # Hide the raw bytes column from display but keep for sorting
+            }
+        )
+    # --- End new code ---
     
     # Display each module as a separate expander (not nested)
     for node in flattened_nodes:
