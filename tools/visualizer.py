@@ -408,25 +408,63 @@ def create_phase_breakdown_chart(phase_groups: Dict[str, List[Dict]]) -> None:
     # Sort by size
     phase_df = phase_df.sort_values("Total Size (bytes)", ascending=False)
 
+    # Truncate long phase names
+    def truncate_phase(phase, max_length=30):
+        if len(phase) <= max_length:
+            return phase
+        return phase[:max_length-3] + "..."
+    
+    phase_df["Display Phase"] = phase_df["Phase"].apply(lambda x: truncate_phase(x))
+
     # Create chart
     fig = px.bar(
         phase_df,
-        x="Phase",
+        x="Display Phase",
         y="Total Size (bytes)",
         title="Memory Usage by Phase",
-        labels={"Total Size (bytes)": "Memory Usage (bytes)"},
-        hover_data=["Tensor Count", "Total Size"],
+        labels={"Total Size (bytes)": "Memory Usage", "Display Phase": "Phase"},
+        hover_data={"Phase": True, "Tensor Count": True, "Total Size": True, "Display Phase": False},
         text="Total Size",
+        color_discrete_sequence=["#4ECDC4"]  # Use consistent color scheme
     )
 
-    # Update styling
-    fig.update_traces(texttemplate="%{text}", textposition="outside", textfont_size=12)
+    # Update styling to match the module chart
+    fig.update_traces(
+        texttemplate='%{text}', 
+        textposition='outside', 
+        textfont_size=10,
+        marker_line_color='rgba(0,0,0,0.2)',
+        marker_line_width=1,
+        hovertemplate='<b>%{customdata[0]}</b><br>' +
+                      'Memory: %{customdata[2]}<br>' +
+                      'Tensor Count: %{customdata[1]}<br>' +
+                      '<extra></extra>'
+    )
 
     fig.update_layout(
         showlegend=False,
-        yaxis_title="Memory Usage (bytes)",
+        yaxis_title="Memory Usage",
         xaxis_title="Phase",
         height=PHASE_CHART_HEIGHT,
+        xaxis_tickangle=-45,
+        margin=dict(l=80, r=80, t=100, b=120),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(size=12),
+        title=dict(
+            font=dict(size=16),
+            x=0.5,
+            xanchor='center'
+        ),
+        yaxis=dict(
+            gridcolor='rgba(128,128,128,0.2)',
+            tickformat='.2s',  # Use SI prefix notation
+            title_font=dict(size=14)
+        ),
+        xaxis=dict(
+            title_font=dict(size=14),
+            tickfont=dict(size=11)
+        )
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -519,25 +557,79 @@ def create_merged_modules_chart(flattened_nodes: List[Dict]) -> None:
 
     st.subheader("Memory Usage by Module Groups")
 
+    # Truncate long pattern names for display
+    def truncate_pattern(pattern, max_length=40):
+        if len(pattern) <= max_length:
+            return pattern
+        # Try to truncate at a meaningful boundary
+        parts = pattern.split('.')
+        truncated = pattern[:max_length-3] + "..."
+        # Try to find a better truncation point at a dot
+        for i in range(max_length-3, 0, -1):
+            if pattern[i] == '.':
+                truncated = pattern[:i] + "..."
+                break
+        return truncated
+    
+    # Create a copy for display with truncated names
+    display_df = merged_df.copy()
+    display_df["Display Pattern"] = display_df["Pattern"].apply(lambda x: truncate_pattern(x))
+    
     # Create bar chart
     fig = px.bar(
-        merged_df,
-        x="Pattern",
+        display_df,
+        x="Display Pattern",
         y="Size (Bytes)",
         title="Memory Usage by Module Groups and Patterns",
-        labels={"Size (Bytes)": "Memory Usage (bytes)", "Pattern": "Module/Group"},
-        hover_data=["Size (Formatted)"],
+        labels={"Size (Bytes)": "Memory Usage", "Display Pattern": "Module/Group"},
+        hover_data={"Pattern": True, "Size (Formatted)": True, "Display Pattern": False},
         color="Is Special Group",
         color_discrete_map={True: COLOR_SPECIAL_GROUP, False: COLOR_MERGED_PATTERN},
+        text="Size (Formatted)"
     )
 
-    # Update layout
+    # Update layout for better display
     fig.update_layout(
         xaxis_tickangle=-45,
         height=MODULE_CHART_HEIGHT,
         showlegend=True,
         legend_title_text="Type",
-        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
+        legend=dict(
+            yanchor="top", 
+            y=0.99, 
+            xanchor="right", 
+            x=0.99,
+            bgcolor="rgba(255, 255, 255, 0.8)",
+            bordercolor="rgba(0, 0, 0, 0.2)",
+            borderwidth=1
+        ),
+        margin=dict(l=80, r=80, t=100, b=120),  # Increase bottom margin for labels
+        plot_bgcolor='rgba(0,0,0,0)',  # Transparent background
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(size=12),
+        title=dict(
+            font=dict(size=16),
+            x=0.5,
+            xanchor='center'
+        ),
+        yaxis=dict(
+            gridcolor='rgba(128,128,128,0.2)',
+            tickformat='.2s',  # Use SI prefix notation (K, M, G)
+            title_font=dict(size=14)
+        ),
+        xaxis=dict(
+            title_font=dict(size=14),
+            tickfont=dict(size=11)
+        )
+    )
+
+    # Update bar appearance
+    fig.update_traces(
+        texttemplate='%{text}',
+        textposition='outside',
+        textfont_size=10,
+        marker_line_color='rgba(0,0,0,0.2)',
+        marker_line_width=1
     )
 
     # Update legend labels
@@ -545,6 +637,13 @@ def create_merged_modules_chart(flattened_nodes: List[Dict]) -> None:
         lambda t: t.update(
             name="Special Group" if t.name == "True" else "Merged Pattern"
         )
+    )
+
+    # Add hover template for better tooltip
+    fig.update_traces(
+        hovertemplate='<b>%{customdata[0]}</b><br>' +
+                      'Memory: %{customdata[1]}<br>' +
+                      '<extra></extra>'
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -587,11 +686,15 @@ def display_merged_modules_table(merged_df: pd.DataFrame) -> None:
         if "merged_patterns_table" in st.session_state:
             del st.session_state["merged_patterns_table"]
 
-    # Display editable table
+    # Display editable table with height set to show all rows
+    # Calculate height based on number of rows (approximately 35px per row + header)
+    table_height = max(400, min(1000, 35 * (len(display_df) + 1)))
+    
     edited_df = st.data_editor(
         display_df,
         hide_index=True,
         use_container_width=True,
+        height=table_height,  # Set height to show all rows
         column_config={
             "Select": st.column_config.CheckboxColumn(
                 "Select",
