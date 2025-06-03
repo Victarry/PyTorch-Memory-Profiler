@@ -1,0 +1,27 @@
+include README.md
+include LICENSE
+include pyproject.toml
+include setup.py
+include MANIFEST.in
+
+# Include all Python files in the package
+recursive-include memory_profiler *.py
+
+# Include type hints
+recursive-include memory_profiler py.typed
+
+# Exclude compiled Python files and cache directories
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude __pycache__
+global-exclude .DS_Store
+
+# Exclude development and testing files from examples
+recursive-exclude examples *
+recursive-exclude tests *
+recursive-exclude docs *
+recursive-exclude tools *
+
+# Exclude version control
+exclude .gitignore
+recursive-exclude .git * 

@@ -26,14 +26,35 @@ A utility library designed to estimate and analyze the memory footprint of PyTor
 ## Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/yourusername/PyTorch-Memory-Profiler.git
+cd PyTorch-Memory-Profiler
+
 # Basic installation
 pip install .
 
-# Installation with optional dependencies for Megatron-LM and Transformer Engine
-# Ensure megatron-core and transformer-engine are installed separately first
-# pip install .[megatron,te] # (Assuming setup.py extras_require is configured)
+# Installation with rich formatting support
+pip install ".[rich]"
+
+# Installation with optional dependencies for Megatron-LM
+# Note: Install megatron-core separately first as it has specific requirements
+pip install ".[megatron]"
+
+# Installation with optional dependencies for Transformer Engine
+# Note: Install transformer-engine separately first as it has specific requirements
+pip install ".[te]"
+
+# Installation with all optional dependencies (except megatron-core and transformer-engine)
+pip install ".[all]"
+
+# Development installation
+pip install -e ".[dev]"
+# or
+pip install -r requirements-dev.txt
+
+# Install from PyPI (when published)
+# pip install pytorch-memory-profiler
 ```
-*(Note: Requires a `setup.py` or `pyproject.toml` with potential `extras_require` for optional dependencies. Adjust installation commands based on your project setup.)*
 
 ## Quick Start
 
@@ -226,7 +247,7 @@ By combining these mechanisms, the library simulates the computation graph's exe
 *   **Estimation Accuracy:** The accuracy depends on PyTorch correctly reporting storage sizes for fake tensors and the dispatcher accurately reflecting real-world operations. Complex custom CUDA kernels might not be perfectly captured.
 *   **Operator Coverage:** While common operations are handled, highly specialized or new PyTorch operations might require specific handling or patching via plugins if they interact poorly with `FakeTensorMode` or `TorchDispatchMode`.
 *   **External Library Patching:** Relies on patching specific functions in external libraries. Updates to these libraries might break compatibility if function signatures or internal logic change significantly. The plugins attempt to handle missing libraries gracefully.
-*   **Data-Dependent Operations:** Operations whose output shape or memory usage depends heavily on input *values* (not just shapes) can be challenging to estimate accurately with fake tensors (e.g., indexing with boolean masks).
+*   **Data-Dependent Operations:** Operations whose output shape or memory usage depends heavily on input *values* (not just shapes) is not supported with fake tensors (e.g., indexing with boolean masks).
 
 ## Contributing
 

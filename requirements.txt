@@ -1,0 +1,7 @@
+# Core dependencies for PyTorch Memory Profiler
+torch>=1.12.0
+
+# Optional dependencies (uncomment as needed)
+# rich>=10.0.0  # For enhanced log formatting and visual output
+# megatron-core  # For tracing memory in models using Megatron's pipeline parallelism
+# transformer-engine  # For tracing memory in models using Transformer Engine layers 

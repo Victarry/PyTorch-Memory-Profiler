@@ -1,0 +1,24 @@
+# Development dependencies for PyTorch Memory Profiler
+# Install with: pip install -r requirements-dev.txt
+
+# Include base requirements
+-r requirements.txt
+
+# Testing
+pytest>=6.0
+pytest-cov
+
+# Code quality
+black
+flake8
+isort
+mypy
+pre-commit
+
+# Documentation (if needed)
+# sphinx
+# sphinx-rtd-theme
+# sphinx-autodoc-typehints
+
+# Optional: enhanced output
+rich>=10.0.0 
