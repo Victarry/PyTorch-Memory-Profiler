@@ -153,7 +153,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of send_forward_recv_backward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(output_tensor, tensor_shape, config, *args):
+        def patched_func(output_tensor, tensor_shape, config, *args, **kwargs):
             # Import needed module inside the function
             import megatron.core as core
 
@@ -175,7 +175,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of send_backward_recv_forward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(input_tensor_grad, tensor_shape, config, *args):
+        def patched_func(input_tensor_grad, tensor_shape, config, *args, **kwargs):
             # Import needed module inside the function
             import megatron.core as core
 
@@ -200,7 +200,13 @@ class P2PCommunicationPlugin(TracerPlugin):
 
         @functools.wraps(orig_func)
         def patched_func(
-            output_tensor, recv_prev, tensor_shape, config, overlap_p2p_comm=False, *args
+            output_tensor,
+            recv_prev,
+            tensor_shape,
+            config,
+            overlap_p2p_comm=False,
+            *args,
+            **kwargs
         ):
             # Always use fake tensors
             if tensor_shape is not None:
@@ -210,7 +216,9 @@ class P2PCommunicationPlugin(TracerPlugin):
                     else torch.float32
                 )
                 fake_tensor = (
-                    self.tracer.create_fake_tensor(*tensor_shape, dtype=config_dtype, requires_grad=True)
+                    self.tracer.create_fake_tensor(
+                        *tensor_shape, dtype=config_dtype, requires_grad=True
+                    )
                     if recv_prev
                     else None
                 )
@@ -238,7 +246,13 @@ class P2PCommunicationPlugin(TracerPlugin):
 
         @functools.wraps(orig_func)
         def patched_func(
-            input_tensor_grad, recv_next, tensor_shape, config, overlap_p2p_comm=False, *args
+            input_tensor_grad,
+            recv_next,
+            tensor_shape,
+            config,
+            overlap_p2p_comm=False,
+            *args,
+            **kwargs
         ):
             # Always use fake tensors
             if tensor_shape is not None:
@@ -248,7 +262,9 @@ class P2PCommunicationPlugin(TracerPlugin):
                     else torch.float32
                 )
                 fake_tensor = (
-                    self.tracer.create_fake_tensor(*tensor_shape, dtype=config_dtype, requires_grad=True)
+                    self.tracer.create_fake_tensor(
+                        *tensor_shape, dtype=config_dtype, requires_grad=True
+                    )
                     if recv_next
                     else None
                 )
@@ -275,7 +291,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of recv_forward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(tensor_shape, config, *args):
+        def patched_func(tensor_shape, config, *args, **kwargs):
             # Import needed module inside the function
             import megatron.core as core
 
@@ -291,7 +307,9 @@ class P2PCommunicationPlugin(TracerPlugin):
                     else torch.float32
                 )
                 # Create a fake tensor for the input
-                return self.tracer.create_fake_tensor(*tensor_shape, dtype=config_dtype, requires_grad=True)
+                return self.tracer.create_fake_tensor(
+                    *tensor_shape, dtype=config_dtype, requires_grad=True
+                )
 
             return None
 
@@ -301,7 +319,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of recv_backward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(tensor_shape, config, *args):
+        def patched_func(tensor_shape, config, *args, **kwargs):
             # Import needed module inside the function
             import megatron.core as core
 
@@ -317,7 +335,9 @@ class P2PCommunicationPlugin(TracerPlugin):
                     else torch.float32
                 )
                 # Create a fake tensor for the output grad
-                return self.tracer.create_fake_tensor(*tensor_shape, dtype=config_dtype, requires_grad=True)
+                return self.tracer.create_fake_tensor(
+                    *tensor_shape, dtype=config_dtype, requires_grad=True
+                )
 
             return None
 
@@ -327,7 +347,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of send_forward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(output_tensor, config, *args):
+        def patched_func(output_tensor, config, *args, **kwargs):
             # Import needed module inside the function
             import megatron.core as core
 
@@ -344,7 +364,7 @@ class P2PCommunicationPlugin(TracerPlugin):
         """Create patched version of send_backward function."""
 
         @functools.wraps(orig_func)
-        def patched_func(input_tensor_grad, config, *args   ):
+        def patched_func(input_tensor_grad, config, *args, **kwargs):
             # Import needed module inside the function
             import megatron.core as core
 
