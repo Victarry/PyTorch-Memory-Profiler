@@ -38,7 +38,7 @@ git apply /path/to/PyTorch-Memory-Profiler/patches/memory_tracing_mcore.patch
 ### Memory tracing with existing training scripts
 
 1. Enable memory tracing by adding the `--memory-tracing` flag to your existing Megatron-LM training command.
-2. Set the `WORLD_RANK` and `RANK` to specify the total number of GPUs and current rank ID.
+2. Set the `WORLD_SIZE` and `RANK` to specify the total number of GPUs and current rank ID.
 3. [Optional] Set `--save-peak-memory-snapshot` to specify the location to save the peak memory snapshot. The snapshot is saved in JSON format, allowing you to directly inspect tensor information or use the provided visualizer.
 
 Explore ./examples/megatron-lm for predefined scripts.
