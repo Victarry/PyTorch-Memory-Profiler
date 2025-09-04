@@ -1,0 +1,44 @@
+---
+globs: *.py
+---
+# Python Coding Standards for Memory Profiler
+
+## Code Style
+- Follow Black formatting with line length of 100
+- Use isort for import organization (profile: black)
+- Type hints are encouraged but not mandatory
+- Use f-strings for string formatting
+
+## Imports
+- Group imports: standard library, third-party, local
+- Use absolute imports for memory_profiler modules
+- Import specific classes/functions, not entire modules
+
+## Documentation
+- All public classes and methods must have docstrings
+- Use Google-style docstrings format
+- Include Args, Returns, and Raises sections where applicable
+- Add type hints in function signatures when possible
+
+## Logging
+- Use the project's logger from `memory_profiler.core.logger`
+- Use appropriate log levels: DEBUG for detailed tracing, INFO for general flow, WARNING for issues
+- Include context in log messages (e.g., tensor shapes, memory sizes)
+
+## Error Handling
+- Catch specific exceptions, not bare except clauses
+- Provide informative error messages
+- Use custom exceptions when appropriate
+- Handle missing optional dependencies gracefully
+
+## Memory Tracking Specific
+- Always use context managers for resource management
+- Clean up hooks and modes properly in exit handlers
+- Track both peak and current memory
+- Include device information in memory reports
+
+## Testing Considerations
+- Mock external dependencies (torch.cuda, distributed)
+- Test with both real and fake tensors
+- Verify memory calculations are correct
+- Test plugin loading and error handling

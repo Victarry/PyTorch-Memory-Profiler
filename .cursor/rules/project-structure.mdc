@@ -1,0 +1,50 @@
+---
+alwaysApply: true
+---
+# PyTorch Memory Profiler Project Structure
+
+This is a PyTorch memory profiling library that estimates memory footprint of models using FakeTensorMode and TorchDispatchMode.
+
+## Core Architecture
+
+### Main Components
+- **memory_profiler/core**: Core memory tracing functionality
+  - [memory_tracer.py](mdc:memory_profiler/core/memory_tracer.py): Main MemoryTracer class that orchestrates memory profiling
+  - [memory_dispatch_mode.py](mdc:memory_profiler/core/memory_dispatch_mode.py): TorchDispatchMode implementation for tracking memory operations
+  - [mod_tracker.py](mdc:memory_profiler/core/mod_tracker.py): Module-level tracking for memory usage attribution
+  - [logger.py](mdc:memory_profiler/core/logger.py): Logging utilities with rich formatting support
+
+### Plugin System
+- **memory_profiler/plugins**: Extensible plugin architecture for different frameworks
+  - [base_plugin.py](mdc:memory_profiler/plugins/base_plugin.py): Abstract base class for all plugins
+  - [distributed_plugin.py](mdc:memory_profiler/plugins/distributed_plugin.py): Distributed training support
+  - [megatron_core_plugin.py](mdc:memory_profiler/plugins/megatron_core_plugin.py): Megatron-LM integration
+  - [transformer_engine_plugin.py](mdc:memory_profiler/plugins/transformer_engine_plugin.py): TransformerEngine support
+  - [p2p_communication_plugin.py](mdc:memory_profiler/plugins/p2p_communication_plugin.py): P2P communication handling
+
+## Key Features
+1. **FakeTensor-based estimation**: Uses PyTorch's FakeTensorMode to estimate memory without actual GPU execution
+2. **Distributed training support**: Can simulate distributed training with a single process
+3. **Module-level tracking**: Pinpoints memory usage to specific model modules
+4. **Phase tracking**: Tracks memory across different training phases (forward, backward, optimizer)
+5. **Visualization**: Includes Streamlit-based visualizer in [tools/visualizer.py](mdc:tools/visualizer.py)
+
+## Project Layout
+```
+pytorch-memory-tracing/
+├── memory_profiler/          # Main package
+│   ├── core/                 # Core functionality
+│   └── plugins/              # Framework integrations
+├── examples/                 # Usage examples
+│   ├── simple/              # Basic single-GPU examples
+│   ├── mcore/               # Megatron-Core examples
+│   └── megatron-lm/         # Megatron-LM scripts
+├── patches/                  # Patches for external libraries
+├── tools/                    # Visualization and analysis tools
+└── docs/                     # Documentation
+```
+
+## Entry Points
+- Main API: `from memory_profiler import MemoryTracer`
+- Simple usage: [examples/simple/single_gpu.py](mdc:examples/simple/single_gpu.py)
+- Megatron integration: [examples/mcore/pretrain_gpt.py](mdc:examples/mcore/pretrain_gpt.py)

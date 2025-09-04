@@ -1,0 +1,65 @@
+---
+globs: tests/**/*.py
+---
+# Testing Guidelines for Memory Profiler
+
+## Test Structure
+- Use pytest as the testing framework
+- Organize tests by component (core/, plugins/, etc.)
+- Name test files as test_<module>.py
+- Use descriptive test function names: test_<functionality>_<scenario>
+
+## Mocking Strategy
+```python
+# Mock CUDA availability
+@pytest.fixture
+def mock_cuda():
+    with patch('torch.cuda.is_available', return_value=True):
+        with patch('torch.cuda.memory_allocated', return_value=1024):
+            yield
+
+# Mock distributed environment
+@pytest.fixture
+def mock_distributed():
+    with patch.dict(os.environ, {'WORLD_SIZE': '4', 'RANK': '0'}):
+        yield
+```
+
+## Test Categories
+
+### Unit Tests
+- Test individual components in isolation
+- Mock all external dependencies
+- Focus on logic correctness
+- Fast execution (< 1 second per test)
+
+### Integration Tests
+- Test component interactions
+- Use fake tensors for GPU operations
+- Verify plugin loading and patching
+- Test complete workflows
+
+### Memory Calculation Tests
+- Verify memory estimation accuracy
+- Compare with actual GPU measurements when possible
+- Test edge cases (empty tensors, views, etc.)
+- Validate peak vs current memory tracking
+
+## Markers
+```python
+@pytest.mark.slow  # Tests taking > 5 seconds
+@pytest.mark.gpu   # Tests requiring actual GPU
+@pytest.mark.distributed  # Tests for distributed scenarios
+```
+
+## Coverage Requirements
+- Maintain > 80% code coverage
+- Focus on critical paths
+- Test error handling and edge cases
+- Include both positive and negative tests
+
+## Performance Testing
+- Profile memory tracer overhead
+- Ensure minimal impact on training speed
+- Test with various model sizes
+- Benchmark against actual GPU execution

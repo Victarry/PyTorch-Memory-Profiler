@@ -1,0 +1,62 @@
+---
+globs: memory_profiler/plugins/*.py
+---
+# Plugin Development Guidelines
+
+## Plugin Interface
+All plugins must inherit from `TracerPlugin` and implement:
+- `setup(tracer)`: Initialize plugin with tracer instance
+- `enter()`: Called when entering tracer context
+- `exit(exc_type, exc_val, exc_tb)`: Cleanup on context exit
+
+## Plugin Responsibilities
+1. **Library Patching**: Override library-specific functions for fake tensor compatibility
+2. **Operation Tracking**: Register custom operations for memory tracking
+3. **Communication Handling**: Mock distributed operations
+4. **Resource Management**: Clean up patches and hooks on exit
+
+## Common Patterns
+
+### Patching External Libraries
+```python
+def enter(self):
+    # Save original function
+    self._original_func = library.function
+    # Replace with patched version
+    library.function = self._patched_function
+    
+def exit(self, exc_type, exc_val, exc_tb):
+    # Restore original
+    library.function = self._original_func
+```
+
+### Handling Optional Dependencies
+```python
+try:
+    import optional_library
+    HAS_LIBRARY = True
+except ImportError:
+    HAS_LIBRARY = False
+    
+def setup(self, tracer):
+    if not HAS_LIBRARY:
+        logger.debug("Optional library not available, skipping plugin")
+        return
+```
+
+### Custom Operation Registration
+```python
+def setup(self, tracer):
+    # Register custom ops with memory dispatcher
+    tracer.memory_dispatch_mode.register_custom_op(
+        op_name="custom_op",
+        memory_func=self.calculate_custom_op_memory
+    )
+```
+
+## Testing Plugins
+- Test with and without the target library
+- Verify patches don't break normal execution
+- Check memory calculations are accurate
+- Test distributed scenarios if applicable
+- Ensure proper cleanup in all exit paths
