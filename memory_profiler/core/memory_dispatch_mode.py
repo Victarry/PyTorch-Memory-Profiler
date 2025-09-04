@@ -36,8 +36,6 @@ class ProblematicOpsDispatchMode(torch.utils._python_dispatch.TorchDispatchMode)
         ]
 
         if any(op_name in func_name for op_name in problematic_ops_list):
-            self.logger.debug(f"ProblematicOpsDispatchMode: Intercepted problematic op {func_name}")
-            
             # For random operations
             if "random_" in func_name:
                 self.logger.debug(f"ProblematicOpsDispatchMode: Handling '{func_name}' by returning input tensor.")

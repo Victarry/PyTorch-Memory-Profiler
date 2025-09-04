@@ -81,7 +81,7 @@ def get_train_data_iterator(batch_size):
         MockGPTDataset, [1000, None, None], lambda: True, config
     ).build()
 
-    train_dataloader = DataLoader(datasets[0], batch_size=batch_size, shuffle=True)
+    train_dataloader = DataLoader(datasets[0], batch_size=batch_size, shuffle=True, generator=torch.Generator(device='cuda'))
 
     train_iterator = iter(train_dataloader)
 

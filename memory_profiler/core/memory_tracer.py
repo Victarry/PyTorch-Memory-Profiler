@@ -22,7 +22,7 @@ class MemoryTracer:
     Memory tracing utility that uses fake tensors to estimate memory usage.
     """
 
-    def __init__(self, device="cuda", log_level=None):
+    def __init__(self, device="cuda", use_fake_tensor=False, log_level=None):
         """
         Initialize the MemoryTracer.
 
@@ -34,7 +34,8 @@ class MemoryTracer:
         self.mod_tracker = ModTracker()
         self.problematic_ops_mode = ProblematicOpsDispatchMode(log_level=log_level)
         self.memory_dispatch_mode = MemoryDispatchMode(log_level=log_level, mod_tracker=self.mod_tracker)
-        
+
+        self.use_fake_tensor = use_fake_tensor
         # Configure specific log level for this tracer if provided
         if log_level is not None:
             self.logger = get_logger(f"{__name__}.instance_{id(self)}")
@@ -63,9 +64,10 @@ class MemoryTracer:
     def register_default_plugins(self):
         """Register the default set of plugins."""
         self.register_plugin(DistributedPlugin())
-        self.register_plugin(TransformerEnginePlugin())
         self.register_plugin(P2PCommunicationPlugin())
         self.register_plugin(MegatronCorePlugin())
+        if self.use_fake_tensor:
+            self.register_plugin(TransformerEnginePlugin())
 
     def register_plugin(self, plugin):
         """Register a plugin with the tracer."""
@@ -86,14 +88,17 @@ class MemoryTracer:
         if device is None:
             device = self.device
 
-        with self.fake_mode:
-            fake_tensor = torch.empty(
-                tensor.shape,
-                dtype=tensor.dtype,
-                device=device,
-                requires_grad=tensor.requires_grad,
-            )
-        return fake_tensor
+        if self.use_fake_tensor:
+            with self.fake_mode:
+                fake_tensor = torch.empty(
+                    tensor.shape,
+                    dtype=tensor.dtype,
+                    device=device,
+                    requires_grad=tensor.requires_grad,
+                )
+            return fake_tensor
+        else:
+            return tensor
 
     def create_fake_tensor(
         self, *shape, dtype=torch.float16, device=None, requires_grad=False
@@ -112,11 +117,16 @@ class MemoryTracer:
         if device is None:
             device = self.device
 
-        with self.fake_mode:
-            fake_input = torch.empty(
+        if self.use_fake_tensor:
+            with self.fake_mode:
+                fake_input = torch.empty(
+                    shape, dtype=dtype, device=device, requires_grad=requires_grad
+                )
+            return fake_input
+        else:
+            return torch.empty(
                 shape, dtype=dtype, device=device, requires_grad=requires_grad
             )
-        return fake_input
 
     def __enter__(self):
         """Enter the context manager, enabling both fake tensors and memory estimation."""
@@ -124,17 +134,19 @@ class MemoryTracer:
         for plugin in self.plugins:
             plugin.enter()
 
-        self.fake_mode.__enter__()
-        self.problematic_ops_mode.__enter__()
+        if self.use_fake_tensor:
+            self.fake_mode.__enter__()
+            self.problematic_ops_mode.__enter__()
         self.memory_dispatch_mode.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exit the context manager, disabling both fake tensors and memory estimation."""
         self.memory_dispatch_mode.__exit__(exc_type, exc_val, exc_tb)
-        self.problematic_ops_mode.__exit__(exc_type, exc_val, exc_tb)
-        self.fake_mode.__exit__(exc_type, exc_val, exc_tb)
-        
+
+        if self.use_fake_tensor:
+            self.fake_mode.__exit__(exc_type, exc_val, exc_tb)
+            self.problematic_ops_mode.__exit__(exc_type, exc_val, exc_tb)
         for plugin in self.plugins:
             plugin.exit(exc_type, exc_val, exc_tb)
         self.mod_tracker.__exit__(exc_type, exc_val, exc_tb)
