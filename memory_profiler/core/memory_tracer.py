@@ -36,6 +36,7 @@ class MemoryTracer:
         self.memory_dispatch_mode = MemoryDispatchMode(log_level=log_level, mod_tracker=self.mod_tracker)
 
         self.use_fake_tensor = use_fake_tensor
+        assert use_fake_tensor == False, "Fake tensor mode has some issues, so we disable it for now."
         # Configure specific log level for this tracer if provided
         if log_level is not None:
             self.logger = get_logger(f"{__name__}.instance_{id(self)}")
@@ -56,6 +57,7 @@ class MemoryTracer:
         self.op_memory = defaultdict(int)
         self.phase_memory = defaultdict(int)
         self.phase_memory_snapshots = defaultdict(lambda: {"before": {}, "after": {}})
+        self.phase_cuda_memory_snapshots = defaultdict(lambda: {"before": {}, "after": {}})  # Store actual CUDA memory per phase
         self.current_phase = "initialization"
 
         self.plugins = []
@@ -181,6 +183,38 @@ class MemoryTracer:
                 1024 * 1024
             )  # Convert bytes to MB
         return current_memory_mb
+    
+    def get_cuda_memory_snapshot(self):
+        """
+        Get current CUDA memory statistics for the specified device only.
+        
+        Returns:
+            dict: Dictionary with CUDA memory statistics for self.device
+        """
+        if not torch.cuda.is_available():
+            return {}
+        
+        # Only track memory for the device specified in __init__
+        if not self.device.startswith("cuda"):
+            return {}
+        
+        snapshot = {}
+        device = torch.device(self.device)
+        
+        # Get device string in consistent format
+        if self.device == "cuda":
+            device_str = f"cuda:{torch.cuda.current_device()}"
+        else:
+            device_str = self.device
+        
+        snapshot[device_str] = {
+            "allocated": torch.cuda.memory_allocated(device) / (1024**2),  # MB
+            "max_allocated": torch.cuda.max_memory_allocated(device) / (1024**2),  # MB
+            "reserved": torch.cuda.memory_reserved(device) / (1024**2),  # MB
+            "max_reserved": torch.cuda.max_memory_reserved(device) / (1024**2),  # MB
+        }
+        
+        return snapshot
 
     @contextlib.contextmanager
     def track_phase(self, phase_name):
@@ -192,6 +226,10 @@ class MemoryTracer:
         """
         # Record memory before entering the phase
         self.phase_memory_snapshots[phase_name]["before"] = self.get_max_memory_allocated()
+        
+        # Record actual CUDA memory before entering the phase (if not using fake tensors)
+        if not self.use_fake_tensor and torch.cuda.is_available():
+            self.phase_cuda_memory_snapshots[phase_name]["before"] = self.get_cuda_memory_snapshot()
 
         prev_phase = self.current_phase
         self.current_phase = phase_name
@@ -203,6 +241,11 @@ class MemoryTracer:
         finally:
             # Record memory after exiting the phase
             self.phase_memory_snapshots[phase_name]["after"] = self.get_max_memory_allocated()
+            
+            # Record actual CUDA memory after exiting the phase (if not using fake tensors)
+            if not self.use_fake_tensor and torch.cuda.is_available():
+                self.phase_cuda_memory_snapshots[phase_name]["after"] = self.get_cuda_memory_snapshot()
+            
             self.current_phase = prev_phase
             self.memory_dispatch_mode.current_phase = prev_phase
 
@@ -211,7 +254,8 @@ class MemoryTracer:
         Get comprehensive memory statistics.
 
         Returns:
-            dict: Dictionary containing peak memory, per-module memory, and per-phase memory
+            dict: Dictionary containing peak memory, per-module memory, and per-phase memory.
+                 When use_fake_tensor=False, also includes actual CUDA memory statistics.
         """
         stats = {
             "peak_memory": {
@@ -236,6 +280,45 @@ class MemoryTracer:
             },
             "operation_counts": dict(self.op_counts),
         }
+        
+        # Add actual CUDA memory statistics when not using fake tensors
+        if not self.use_fake_tensor and torch.cuda.is_available() and self.device.startswith("cuda"):
+            cuda_stats = {}
+            
+            # Only get stats for the specified device
+            device = torch.device(self.device)
+            
+            # Get device string in consistent format
+            if self.device == "cuda":
+                device_str = f"cuda:{torch.cuda.current_device()}"
+            else:
+                device_str = self.device
+            
+            allocated = torch.cuda.memory_allocated(device)
+            max_allocated = torch.cuda.max_memory_allocated(device)
+            reserved = torch.cuda.memory_reserved(device)
+            max_reserved = torch.cuda.max_memory_reserved(device)
+            
+            cuda_stats = {
+                "device": device_str,
+                "allocated": f"{allocated / (1024**2):.2f} MB",
+                "max_allocated": f"{max_allocated / (1024**2):.2f} MB",
+                "reserved": f"{reserved / (1024**2):.2f} MB",
+                "max_reserved": f"{max_reserved / (1024**2):.2f} MB",
+            }
+            
+            stats["cuda_memory"] = cuda_stats
+            
+            # Add phase-level CUDA memory snapshots
+            if self.phase_cuda_memory_snapshots:
+                phase_cuda_stats = {}
+                for phase, snapshots in self.phase_cuda_memory_snapshots.items():
+                    phase_cuda_stats[phase] = {
+                        "before": snapshots["before"],
+                        "after": snapshots["after"]
+                    }
+                stats["phase_cuda_memory_snapshots"] = phase_cuda_stats
+            
         return stats
 
     def print_memory_stats(self, header=None):
@@ -301,8 +384,59 @@ class MemoryTracer:
         
         log_memory_table(
             self.logger,
-            "Peak Memory Changes in each phase:",
+            "Tracked Tensors Peak Memory Changes in each phase:",
             ["Phase", "Device", "Before (MB)", "After (MB)", "Delta (MB)"],
             rows,
             level=logging.CRITICAL
         )
+        
+
+        # --- Phase-level Actual CUDA Memory Statistics (if available) ---
+        if "phase_cuda_memory_snapshots" in stats and stats["phase_cuda_memory_snapshots"]:
+            rows = []
+            for phase, snapshots in stats["phase_cuda_memory_snapshots"].items():
+                before_snapshots = snapshots["before"]
+                after_snapshots = snapshots["after"]
+                
+                # Process each device
+                all_devices = set()
+                if before_snapshots:
+                    all_devices.update(before_snapshots.keys())
+                if after_snapshots:
+                    all_devices.update(after_snapshots.keys())
+                
+                for device in sorted(all_devices):
+                    before_data = before_snapshots.get(device, {})
+                    after_data = after_snapshots.get(device, {})
+                    
+                    # Get peak memory values (max_allocated) with defaults
+                    before_peak = before_data.get("max_allocated", 0)
+                    after_peak = after_data.get("max_allocated", 0)
+                    delta_peak = after_peak - before_peak
+                    
+                    before_max_reserved = before_data.get("max_reserved", 0)
+                    after_max_reserved = after_data.get("max_reserved", 0)
+                    delta_max_reserved = after_max_reserved - before_max_reserved
+                    
+                    # Only show devices with actual memory usage
+                    if before_peak > 0 or after_peak > 0:
+                        rows.append([
+                            phase,
+                            device,
+                            f"{before_peak:.2f}",
+                            f"{after_peak:.2f}",
+                            f"{delta_peak:+.2f}",
+                            f"{before_max_reserved:.2f}",
+                            f"{after_max_reserved:.2f}",
+                            f"{delta_max_reserved:+.2f}"
+                        ])
+            
+            if rows:
+                log_memory_table(
+                    self.logger,
+                    "Peak Actual CUDA Memory Changes per Phase:",
+                    ["Phase", "Device", "Peak Before (MB)", "Peak After (MB)", "Δ Peak", 
+                     "Max Rsrv Before (MB)", "Max Rsrv After (MB)", "Δ Max Rsrv"],
+                    rows,
+                    level=logging.CRITICAL
+                )

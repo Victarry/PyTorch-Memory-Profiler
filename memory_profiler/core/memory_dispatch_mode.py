@@ -162,11 +162,12 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
                 self.logger.error(f"Exception: {type(e).__name__}: {str(e)}")
             
             return None
-
         # Track all output tensors' memory usage and record their creation module
         tree_map_only(
             torch.Tensor, lambda t: self.track_tensor_memory(t, current_module), outputs
         )
+        return outputs
+        # TODO: revise this implementation for fake tensor mode
         if isinstance(outputs, torch.Tensor):
             # Always move to cuda since modules.to("cuda") doesn't work for FakeTensor.
             return outputs.to('cuda') 
@@ -247,7 +248,8 @@ class MemoryDispatchMode(torch.utils._python_dispatch.TorchDispatchMode):
         }
 
         # # --- Patch storage.resize_ to intercept manual release --- 
-        storage.resize_ = self.create_patched_resize_(nbytes, device_id)
+        # TODO: revise this implementation
+        # storage.resize_ = self.create_patched_resize_(nbytes, device_id)
 
         # Apply the patch - monkey patching the storage instance
         # This assumes storage objects are mutable and allow attribute assignment

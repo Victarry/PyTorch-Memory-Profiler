@@ -81,7 +81,7 @@ def get_train_data_iterator(batch_size):
         MockGPTDataset, [1000, None, None], lambda: True, config
     ).build()
 
-    train_dataloader = DataLoader(datasets[0], batch_size=batch_size, shuffle=True, generator=torch.Generator(device='cuda'))
+    train_dataloader = DataLoader(datasets[0], batch_size=batch_size, shuffle=True)
 
     train_iterator = iter(train_dataloader)
 
@@ -171,11 +171,6 @@ def silicon_main(args, model_provider_func):
 
 def estimated_main(args, model_provider_func):
     """Run memory estimation with the GPT model."""
-    # Create memory tracer
-    device = torch.device("cuda")
-    estimator = MemoryTracer(device=device)
-    torch.set_default_device(device)
-
     # Initialize distributed setup
     initialize_distributed(
         tensor_model_parallel_size=args.tp_size,
@@ -187,17 +182,19 @@ def estimated_main(args, model_provider_func):
     model_parallel_cuda_manual_seed(123)
     train_iterator = get_train_data_iterator(args.mbs)
 
+    # Create memory tracer
+    rank = torch.distributed.get_rank()
+    torch.cuda.set_device(rank)
+
+    estimator = MemoryTracer(device="cuda", use_fake_tensor=False)
+
     with estimator:
-
-        rank = torch.distributed.get_rank()
-        torch.cuda.set_device(rank)
-
-        # Create model
+        # Create model and move to CUDA
         with estimator.track_phase("model_creation"):
             gpt_model = model_provider_func()
-
-        device = torch.device("cuda")
-        gpt_model.to(device)
+            device = torch.device("cuda")
+            gpt_model.to(device)
+            optim = Adam(gpt_model.parameters())
 
         def forward_step_func(data_iterator, model):
             def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
@@ -232,7 +229,6 @@ def estimated_main(args, model_provider_func):
 
             return output_tensor, partial(loss_func, fake_loss_mask)
 
-        optim = Adam(gpt_model.parameters())
 
         forward_backward_func = get_forward_backward_func()
 
@@ -240,7 +236,7 @@ def estimated_main(args, model_provider_func):
         for iteration in range(2):
             optim.zero_grad()
 
-            with estimator.track_phase("forward-backward"):
+            with estimator.track_phase(f"forward-backward-{iteration}"):
                 losses_reduced = forward_backward_func(
                     forward_step_func=forward_step_func,
                     data_iterator=train_iterator,
@@ -252,7 +248,7 @@ def estimated_main(args, model_provider_func):
                     forward_only=False,
                 )
             
-            with estimator.track_phase("optimizer_step"):
+            with estimator.track_phase(f"optimizer_step-{iteration}"):
                 optim.step()
 
         estimator.print_memory_stats()
