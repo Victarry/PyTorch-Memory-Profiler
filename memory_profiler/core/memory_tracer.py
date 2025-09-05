@@ -30,6 +30,7 @@ class MemoryTracer:
             device (str): The device to emulate, default is "cuda"
             log_level (int, optional): Logging level to use for this tracer
         """
+        assert isinstance(device, str), "device must be a str, like cuda:0"
         self.device = device
         self.mod_tracker = ModTracker()
         self.problematic_ops_mode = ProblematicOpsDispatchMode(log_level=log_level)

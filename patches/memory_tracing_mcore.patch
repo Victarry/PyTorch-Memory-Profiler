@@ -1,185 +1,43 @@
-From 423ecc658ae32b90982a1ea218df5b10b204cf39 Mon Sep 17 00:00:00 2001
+From ace0deb03887de46389b90ca1840cdb55ae1471a Mon Sep 17 00:00:00 2001
 From: Dennis Liu <denliu@nvidia.com>
-Date: Thu, 29 May 2025 01:13:10 -0700
-Subject: [PATCH] Implement memory tracing feature in Megatron-LM
+Date: Thu, 4 Sep 2025 23:51:19 -0700
+Subject: [PATCH] Add single rank memory-tracing support.
 
-- Added `memory_tracing` configuration option to enable memory tracing during training.
-- Updated various components to support memory tracing, including model setup, optimizer steps, and training iterations.
-- Introduced a function to update arguments for memory tracing mode.
-- Integrated `MemoryTracer` for tracking memory usage and added conditions to handle gradient clipping and tensor operations based on memory tracing status.
-- Enhanced the `TransformerConfig` and `OptimizerConfig` classes to accommodate memory tracing settings.
-
-Signed-off-by: Dennis Liu <denliu@nvidia.com>
 ---
- megatron/core/optimizer/optimizer.py            | 32 +++++-----
- megatron/core/optimizer/optimizer_config.py     |  3 +
- megatron/core/transformer/moe/experts.py        | 11 +++-
- megatron/core/transformer/transformer_block.py  |  2 +-
- megatron/core/transformer/transformer_config.py | 27 ++++++++
- megatron/training/arguments.py                  | 63 +++++++++++++++++++
- megatron/training/initialize.py                 |  6 ++
- megatron/training/training.py                   | 84 ++++++++++++++++---------
- pretrain_gpt.py                                 | 40 ++++++++++++
- 9 files changed, 222 insertions(+), 46 deletions(-)
+ megatron/core/optimizer/__init__.py | 12 ++---
+ megatron/training/arguments.py      | 55 +++++++++++++++++++
+ megatron/training/initialize.py     |  6 +++
+ megatron/training/training.py       | 84 ++++++++++++++++++-----------
+ 4 files changed, 121 insertions(+), 36 deletions(-)
 
-diff --git a/megatron/core/optimizer/optimizer.py b/megatron/core/optimizer/optimizer.py
-index 5d2ec82..72c1c8a 100644
---- a/megatron/core/optimizer/optimizer.py
-+++ b/megatron/core/optimizer/optimizer.py
-@@ -1126,22 +1126,26 @@ class ChainedOptimizer(MegatronOptimizer):
-         if found_inf_flag:
-             return False, None, None
+diff --git a/megatron/core/optimizer/__init__.py b/megatron/core/optimizer/__init__.py
+index 940e22302..114e70658 100644
+--- a/megatron/core/optimizer/__init__.py
++++ b/megatron/core/optimizer/__init__.py
+@@ -138,12 +138,12 @@ def _get_param_groups(
+     # so we need to align the param groups across ranks, otherwise we may have
+     # runtime error when loading the checkpoint or numerical error when resuming training.
+     params_key = list(params_map.keys())
+-    gathered_params_key = [None for _ in range(torch.distributed.get_world_size())]
+-    torch.distributed.all_gather_object(gathered_params_key, params_key)
+-    for keys in gathered_params_key:
+-        for key in keys:
+-            if key not in params_key:
+-                params_key.append(key)
++    # gathered_params_key = [None for _ in range(torch.distributed.get_world_size())]
++    # torch.distributed.all_gather_object(gathered_params_key, params_key)
++    # for keys in gathered_params_key:
++    #     for key in keys:
++    #         if key not in params_key:
++    #             params_key.append(key)
  
--        grad_norm = self.get_grad_norm()
-+        if not self.config.memory_tracing:
-+            grad_norm = self.get_grad_norm()
- 
--        # Clip gradients.
--        for optimizer in self.chained_optimizers:
--            if hasattr(optimizer, 'is_stub_optimizer') and optimizer.is_stub_optimizer:
--                continue
--            if optimizer.config.clip_grad > 0.0:
--                clip_grad_by_total_norm_fp32(
--                    optimizer.get_parameters(),
--                    max_norm=optimizer.config.clip_grad,
--                    total_norm=grad_norm,
--                    use_decoupled_grad=optimizer.config.use_precision_aware_optimizer,
--                )
-+            # Clip gradients.
-+            for optimizer in self.chained_optimizers:
-+                if hasattr(optimizer, 'is_stub_optimizer') and optimizer.is_stub_optimizer:
-+                    continue
-+                if optimizer.config.clip_grad > 0.0:
-+                    clip_grad_by_total_norm_fp32(
-+                        optimizer.get_parameters(),
-+                        max_norm=optimizer.config.clip_grad,
-+                        total_norm=grad_norm,
-+                        use_decoupled_grad=optimizer.config.use_precision_aware_optimizer,
-+                    )
- 
--        # Count the zeros in the grads.
--        num_zeros_in_grad = self.count_zeros()
-+            # Count the zeros in the grads.
-+            num_zeros_in_grad = self.count_zeros()
-+        else:
-+            grad_norm = None
-+            num_zeros_in_grad = None
- 
-         update_successful = self.step_with_ready_grads()
- 
-diff --git a/megatron/core/optimizer/optimizer_config.py b/megatron/core/optimizer/optimizer_config.py
-index 5bcaaf5..bfd11b8 100644
---- a/megatron/core/optimizer/optimizer_config.py
-+++ b/megatron/core/optimizer/optimizer_config.py
-@@ -152,6 +152,9 @@ class OptimizerConfig:
-     ################
-     # Miscellaneous
-     ################
-+    memory_tracing: bool = False
-+    """If true, enable memory tracing."""
-+
-     clip_grad: float = 1.0
-     """Gradient clipping based on global L2 norm."""
- 
-diff --git a/megatron/core/transformer/moe/experts.py b/megatron/core/transformer/moe/experts.py
-index f68df4b..07c0605 100644
---- a/megatron/core/transformer/moe/experts.py
-+++ b/megatron/core/transformer/moe/experts.py
-@@ -746,6 +746,9 @@ class TEGroupedMLP(MegatronModule):
-             output (torch.Tensor): The output of the local experts.
-         """
-         tokens_per_expert = tokens_per_expert.tolist()
-+        if self.config.moe_pad_expert_input_to_capacity:
-+            num_tokens = permuted_local_hidden_states.shape[0]
-+            tokens_per_expert = [num_tokens // self.num_local_experts] * self.num_local_experts
-         if self.config.fp8:
-             actual_tokens_per_expert = tokens_per_expert
-             permuted_local_hidden_states, tokens_per_expert = self.fp8_padding(
-@@ -949,8 +952,12 @@ class SequentialMLP(MegatronModule):
-             return output, output_bias
-         else:
-             tokens_per_expert = tokens_per_expert.tolist()
--            tokens_list = torch.split(permuted_local_hidden_states, tokens_per_expert)
--            probs_list = torch.split(permuted_probs, tokens_per_expert)
-+            if self.config.moe_pad_expert_input_to_capacity:
-+                tokens_list = torch.chunk(permuted_local_hidden_states, len(tokens_per_expert), 0)
-+                probs_list = torch.chunk(permuted_probs, len(tokens_per_expert), 0)
-+            else:
-+                tokens_list = torch.split(permuted_local_hidden_states, tokens_per_expert)
-+                probs_list = torch.split(permuted_probs, tokens_per_expert)
- 
-             output_local_list = []
-             output_bias_list = []
-diff --git a/megatron/core/transformer/transformer_block.py b/megatron/core/transformer/transformer_block.py
-index 1074b91..b0f6d6a 100755
---- a/megatron/core/transformer/transformer_block.py
-+++ b/megatron/core/transformer/transformer_block.py
-@@ -523,7 +523,7 @@ class TransformerBlock(MegatronModule):
-         #   is called here to be future-proof and corner-case-proof.
-         hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
- 
--        if self.config.sequence_parallel:
-+        if self.config.sequence_parallel and not self.config.memory_tracing:
-             rng_context = tensor_parallel.get_cuda_rng_tracker().fork()
-         else:
-             rng_context = nullcontext()
-diff --git a/megatron/core/transformer/transformer_config.py b/megatron/core/transformer/transformer_config.py
-index 6ba0199..247828f 100644
---- a/megatron/core/transformer/transformer_config.py
-+++ b/megatron/core/transformer/transformer_config.py
-@@ -29,6 +29,27 @@ class TransformerConfig(ModelParallelConfig):
-     including those in ModelParallelConfig.
-     """
- 
-+    def _update_for_memory_tracing(self):
-+        """Update the config for memory tracing."""
-+        self.no_persist_layer_norm = True
-+        self.tp_comm_overlap = False
-+        self.apply_rope_fusion = False
-+        self.moe_permute_fusion = False
-+
-+        # FP8 related
-+        assert self.fp8 is None, "fp8 is not supported in memory tracing"
-+
-+        # MoE related
-+        if self.moe_expert_capacity_factor is None:
-+            self.moe_expert_capacity_factor = 1.0
-+            print("Warning: moe_expert_capacity_factor is not set, using 1.0 for memory tracing.")
-+        self.moe_pad_expert_input_to_capacity = True
-+
-+        if self.moe_token_dispatcher_type != "alltoall":
-+            self.moe_token_dispatcher_type = "alltoall"
-+            print("Warning: moe_token_dispatcher_type is set to alltoall for memory tracing.")
-+        self.moe_enable_deepep = False
-+
-     ####################
-     # model architecture
-     ####################
-@@ -532,6 +553,9 @@ class TransformerConfig(ModelParallelConfig):
-     config_logger_dir: str = ""
-     """When non-empty, dumps entry-point configs to config_logger_dir"""
- 
-+    memory_tracing: bool = False
-+    """If set, memory tracing mode is enabled and no actual computation is performed."""
-+
-     flash_decode: bool = False
-     """ Use the optimized flash decoding kernel during inference. """
- 
-@@ -1101,6 +1125,9 @@ class TransformerConfig(ModelParallelConfig):
-                     self.cp_comm_type, str
-                 ), "Unsupported communication type for context parallelism!"
- 
-+        if self.memory_tracing:
-+            self._update_for_memory_tracing()
-+
-         assert (
-             self.pipeline_model_parallel_size > 0
-         ), f"Pipeline model parallel size must be larger than 0 \
+     param_groups = []
+     for key in params_key:
 diff --git a/megatron/training/arguments.py b/megatron/training/arguments.py
-index e62901d..bb01e93 100644
+index e3116517b..17a2f6841 100644
 --- a/megatron/training/arguments.py
 +++ b/megatron/training/arguments.py
-@@ -318,6 +318,62 @@ def moe_freq_type(x):
+@@ -332,6 +332,54 @@ def moe_freq_type(x):
          return int(x)
  
  
@@ -197,8 +55,10 @@ index e62901d..bb01e93 100644
 +        args.global_batch_size = args.global_batch_size * min_num_micro_batches // num_micro_batches
 +
 +    # Checkpointing related
-+    args.save = None
 +    args.load = None
++    args.save = None
++    args.rerun_mode = "disabled"
++    args.check_for_nan_in_loss_and_grad = False
 +
 +    # Data related
 +    args.data_path = None
@@ -208,28 +68,19 @@ index e62901d..bb01e93 100644
 +    args.enable_gloo_process_groups = False
 +
 +    # Logging related
-+    args.gradient_accumulation_fusion = False
-+    args.check_for_nan_in_loss_and_grad = False
 +    args.log_params_norm = False
 +    args.log_timers_to_tensorboard = False
 +    args.tensorboard_dir = None
 +    args.wandb_project = None
 +
 +    # Kernel related
-+    args.no_persist_layer_norm = True
 +    args.tp_comm_overlap = False
-+    args.apply_rope_fusion = False
-+    args.moe_permute_fusion = False
-+
-+    # FP8 related
-+    assert args.fp8 is None, "fp8 is not supported in memory tracing"
-+
-+    # MoE related
 +    if args.moe_expert_capacity_factor is None:
 +        args.moe_expert_capacity_factor = 1.0
 +        print("Warning: moe_expert_capacity_factor is not set, using 1.0 for memory tracing.")
 +    args.moe_pad_expert_input_to_capacity = True
 +
++    # MoE related
 +    if args.moe_token_dispatcher_type != "alltoall":
 +        args.moe_token_dispatcher_type = "alltoall"
 +        print("Warning: moe_token_dispatcher_type is set to alltoall for memory tracing.")
@@ -238,11 +89,10 @@ index e62901d..bb01e93 100644
 +    # Training related
 +    args.exit_signal_handler = False
 +    args.exit_duration_in_mins = None
-+
  def validate_args(args, defaults={}):
  
      # Temporary
-@@ -948,6 +1004,9 @@ def validate_args(args, defaults={}):
+@@ -1036,6 +1084,9 @@ def validate_args(args, defaults={}):
              # optimizer state in the CPU memory of DP rank 0.
              assert args.use_dist_ckpt
  
@@ -252,7 +102,7 @@ index e62901d..bb01e93 100644
      # Checkpointing
      if args.ckpt_fully_parallel_save_deprecated and args.rank == 0:
          print('--ckpt-fully-parallel-save flag is deprecated and has no effect.'
-@@ -1618,6 +1677,10 @@ def _add_regularization_args(parser):
+@@ -1819,6 +1870,10 @@ def _add_rl_args(parser):
  def _add_training_args(parser):
      group = parser.add_argument_group(title='training')
  
@@ -264,7 +114,7 @@ index e62901d..bb01e93 100644
                         help='Batch size per model instance (local batch size). '
                         'Global batch size is local batch size times data '
 diff --git a/megatron/training/initialize.py b/megatron/training/initialize.py
-index abca159..9bd55c9 100644
+index 85b771448..00805e7bc 100644
 --- a/megatron/training/initialize.py
 +++ b/megatron/training/initialize.py
 @@ -332,6 +332,12 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
@@ -281,20 +131,20 @@ index abca159..9bd55c9 100644
          torch.distributed.init_process_group(**init_process_group_kwargs)
          inprocess_restart.maybe_force_nccl_backend_init(device_id)
 diff --git a/megatron/training/training.py b/megatron/training/training.py
-index 2a8d995..4785958 100644
+index f50af683b..b27c4d7a7 100644
 --- a/megatron/training/training.py
 +++ b/megatron/training/training.py
-@@ -11,6 +11,7 @@ import math
+@@ -10,6 +10,7 @@ import math
  import os
  import sys
  from typing import List, Optional
 +import contextlib
  
  import torch.distributed
- from .log_handler import CustomHandler
-@@ -123,6 +124,10 @@ from .global_vars import (
-     get_wandb_writer,
-     get_one_logger,
+ 
+@@ -124,6 +125,10 @@ from .global_vars import (
+     get_tokenizer,
+     get_energy_monitor,
  )
 +try:
 +    from memory_profiler import MemoryTracer
@@ -303,15 +153,15 @@ index 2a8d995..4785958 100644
  from . import one_logger_utils
  
  from . import ft_integration
-@@ -802,9 +807,19 @@ def pretrain(
+@@ -656,9 +661,17 @@ def pretrain(
+ 
      # Model, optimizer, and learning rate.
      timers('model-and-optimizer-setup', log_level=0).start(barrier=True)
-     app_metrics['app_build_optimizer_start_time'] = one_logger_utils.get_timestamp_in_ms()
 -    model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
 -        model_provider, model_type, checkpointing_context=checkpointing_context
 -    )
 +    if args.memory_tracing:
-+        device = torch.cuda.current_device()
++        device = f"cuda:{torch.cuda.current_device()}"
 +        estimator = MemoryTracer(device=device)
 +    else:
 +        estimator = contextlib.nullcontext()
@@ -321,12 +171,10 @@ index 2a8d995..4785958 100644
 +        model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
 +            model_provider, model_type, checkpointing_context=checkpointing_context
 +        )
-+    for model_chunk in model:
-+        unwrapped_model = unwrap_model(model_chunk)
  
      timers('model-and-optimizer-setup').stop()
      print_datetime('after model, optimizer, and learning rate ' 'scheduler are built')
-@@ -860,18 +875,20 @@ def pretrain(
+@@ -718,18 +731,20 @@ def pretrain(
  
          iteration = 0
          if args.do_train and args.train_iters > 0:
@@ -359,19 +207,19 @@ index 2a8d995..4785958 100644
  
          print_datetime('after training is done')
  
-@@ -1344,7 +1361,7 @@ def dummy_train_step(data_iterator):
-         batch = get_batch_on_this_cp_rank(batch)
+@@ -1209,7 +1224,7 @@ def dummy_train_step(data_iterator):
+             batch = get_batch_on_this_cp_rank(batch)
  
  
--def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config):
-+def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config, estimator):
+-def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func):
++def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func, estimator):
      """Single training step."""
      args = get_args()
      timers = get_timers()
-@@ -1379,17 +1396,19 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
+@@ -1238,17 +1253,19 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
+                     optim_instance._copy_main_params_to_param_buffer()
  
          # Forward pass.
-         forward_backward_func = get_forward_backward_func()
 -        losses_reduced = forward_backward_func(
 -            forward_step_func=forward_step_func,
 -            data_iterator=data_iterator,
@@ -399,7 +247,7 @@ index 2a8d995..4785958 100644
      should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
      if should_exit:
          return {}, True, should_checkpoint, should_exit, exit_code, None, None
-@@ -1406,7 +1425,13 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
+@@ -1265,7 +1282,13 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
      # Update parameters.
  
      timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
@@ -414,7 +262,16 @@ index 2a8d995..4785958 100644
      timers('optimizer').stop()
  
      # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
-@@ -2001,6 +2026,7 @@ def train(
+@@ -1526,7 +1549,7 @@ def training_log(
+             mtp_loss_scale, iteration, writer, wandb_writer, total_loss_dict
+         )
+     if iteration % args.log_interval == 0:
+-        if args.record_memory_history and is_last_rank():
++        if args.record_memory_history:
+             snapshot = torch.cuda.memory._snapshot()
+             from pickle import dump
+ 
+@@ -1905,6 +1928,7 @@ def train(
      config,
      checkpointing_context,
      non_loss_data_func,
@@ -422,66 +279,15 @@ index 2a8d995..4785958 100644
  ):
      """Training function: run train_step desired number of times, run validation, checkpoint."""
      args = get_args()
-@@ -2227,7 +2253,7 @@ def train(
+@@ -2195,7 +2219,7 @@ def train(
              grad_norm,
              num_zeros_in_grad,
          ) = train_step(
--            forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config
-+            forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, estimator
+-            forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func
++            forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func, estimator
          )
          ft_integration.on_training_step_end()
          if should_checkpoint:
-diff --git a/pretrain_gpt.py b/pretrain_gpt.py
-index 72c539f..365a14a 100644
---- a/pretrain_gpt.py
-+++ b/pretrain_gpt.py
-@@ -272,6 +272,46 @@ def forward_step(data_iterator, model: GPTModel):
-     global stimer
-     with stimer(bdata=True):
-         tokens, labels, loss_mask, attention_mask, position_ids = get_batch(data_iterator)
-+
-+        if args.memory_tracing:
-+            from torch._subclasses import FakeTensorMode
-+            with FakeTensorMode(allow_non_fake_inputs=True):
-+                if tokens is not None:
-+                    tokens = torch.empty(
-+                        tokens.shape,
-+                        dtype=tokens.dtype,
-+                        device=tokens.device,
-+                        requires_grad=tokens.requires_grad
-+                    )
-+                if labels is not None:
-+                    labels = torch.empty(
-+                        labels.shape,
-+                        dtype=labels.dtype,
-+                        device=labels.device,
-+                        requires_grad=labels.requires_grad
-+                    )
-+                if loss_mask is not None:
-+                    loss_mask = torch.empty(
-+                        loss_mask.shape,
-+                        dtype=loss_mask.dtype,
-+                        device=loss_mask.device,
-+                        requires_grad=loss_mask.requires_grad
-+                    )
-+                if attention_mask is not None:
-+                    attention_mask = torch.empty(
-+                        attention_mask.shape,
-+                        dtype=attention_mask.dtype,
-+                        device=attention_mask.device,
-+                        requires_grad=attention_mask.requires_grad
-+                    )
-+                if position_ids is not None:
-+                    position_ids = torch.empty(
-+                        position_ids.shape,
-+                        dtype=position_ids.dtype,
-+                        device=position_ids.device,
-+                        requires_grad=position_ids.requires_grad
-+                    )
-+
-     timers('batch-generator').stop()
- 
-     with stimer:
 -- 
-1.8.3.1
+2.34.1
 
