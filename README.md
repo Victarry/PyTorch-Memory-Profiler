@@ -13,23 +13,17 @@ Training large models like LLMs requires careful memory management. Traditional 
 
 ## ⚡ Key Features
 
-### 🔍 **Single-GPU Distributed Simulation**
+### **Single-GPU Distributed Simulation**
 Profile memory usage for TP/PP/EP configurations using just one GPU - simulate what would happen with hundreds of GPUs!
 
-### 📊 **Module-Level Memory Tracking**
+### **Module-Level Memory Tracking**
 Precisely identify which layers and operations consume the most memory with PyTorch hooks integration.
 
-### 📈 **Rich Visualization & Reporting**
+### **Rich Visualization & Reporting**
 - Interactive memory usage charts
 - Per-module memory breakdown
 - Phase-by-phase analysis (forward, backward, optimizer)
 - Tensor creation statistics with stack traces
-
-### 🔌 **Seamless Megatron-LM Integration**
-Add one flag (`--memory-tracing`) to your existing training script - that's it!
-
-### 🧪 **Advanced Analysis** *(Coming Soon)*
-FakeTensor mode for zero-compute memory estimation without actual execution.
 
 ## 🛠️ Installation
 
