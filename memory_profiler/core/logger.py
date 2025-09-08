@@ -7,7 +7,7 @@ from rich.logging import RichHandler
 
 # Configure default logging levels
 DEFAULT_LOG_LEVEL = logging.INFO
-CONSOLE = Console(highlight=True, width=200)
+CONSOLE = Console(highlight=True, width=400)
 
 def configure_logging(
     level: Optional[int] = None,
@@ -31,7 +31,13 @@ def configure_logging(
     
     # Console handler (with or without rich formatting)
     if rich_format:
-        console_handler = RichHandler(console=CONSOLE, rich_tracebacks=True)
+        console_handler = RichHandler(
+            console=CONSOLE, 
+            rich_tracebacks=True,
+            show_path=False,  # Disable showing file:line location
+            show_time=False,  # Optionally disable time as well for cleaner output
+            show_level=False  # Disable showing log level (INFO, CRITICAL, etc.)
+        )
         log_format = "%(message)s"
     else:
         console_handler = logging.StreamHandler()

@@ -1,4 +1,5 @@
 import torch
+import os
 import contextlib
 from collections import defaultdict
 import logging
@@ -63,6 +64,16 @@ class MemoryTracer:
 
         self.plugins = []
         self.register_default_plugins()
+    
+    @staticmethod
+    def fake_init_process_group():
+        """Fake init process group."""
+        assert not torch.distributed.is_initialized(), "Distributed is already initialized"
+        from torch.testing._internal.distributed.fake_pg import FakeStore
+        store = FakeStore()
+        world_size = int(os.environ["WORLD_SIZE"])
+        rank = int(os.environ["RANK"])
+        torch.distributed.init_process_group(backend="fake", store=store, world_size=world_size, rank=rank)
 
     def register_default_plugins(self):
         """Register the default set of plugins."""
@@ -332,33 +343,27 @@ class MemoryTracer:
         stats = self.get_memory_stats()
 
         # Log the memory usage header
-        header_text = f"MEMORY USAGE ESTIMATION: {header if header else ''}"
+        header_text = f"MEMORY USAGE PROFILING: {header if header else ''}"
         self.logger.info(f"\n===== {header_text} =====")
 
-        # --- Peak Memory Usage Table ---
+        # --- Memory Usage Table (Peak and Current) ---
         rows = []
-        for dev, mem in stats["peak_memory"].items():
-            mem_val = float(mem.split()[0])
-            rows.append([dev, f"{mem_val:.2f}"])
+        # Get all unique devices from both peak and current memory
+        all_devices = set(list(stats["peak_memory"].keys()) + list(stats["current_memory"].keys()))
+        
+        for dev in sorted(all_devices):
+            peak_mem = stats["peak_memory"].get(dev, "0 MB")
+            current_mem = stats["current_memory"].get(dev, "0 MB")
+            
+            peak_val = float(peak_mem.split()[0])
+            current_val = float(current_mem.split()[0])
+            
+            rows.append([dev, f"{peak_val:.2f}", f"{current_val:.2f}"])
         
         log_memory_table(
             self.logger,
-            "Peak Memory Usage:",
-            ["Device", "Peak Memory (MB)"],
-            rows,
-            level=logging.CRITICAL
-        )
-
-        # --- Current Memory Usage Table ---
-        rows = []
-        for dev, mem in stats["current_memory"].items():
-            mem_val = float(mem.split()[0])
-            rows.append([dev, f"{mem_val:.2f}"])
-            
-        log_memory_table(
-            self.logger,
-            "Current Memory Usage:",
-            ["Device", "Current Memory (MB)"],
+            "Memory Usage Summary:",
+            ["Device", "Peak Memory (MB)", "Current Memory (MB)"],
             rows,
             level=logging.CRITICAL
         )
@@ -410,6 +415,11 @@ class MemoryTracer:
                     before_data = before_snapshots.get(device, {})
                     after_data = after_snapshots.get(device, {})
                     
+                    # Get current allocated memory values with defaults
+                    before_allocated = before_data.get("allocated", 0)
+                    after_allocated = after_data.get("allocated", 0)
+                    delta_allocated = after_allocated - before_allocated
+                    
                     # Get peak memory values (max_allocated) with defaults
                     before_peak = before_data.get("max_allocated", 0)
                     after_peak = after_data.get("max_allocated", 0)
@@ -420,10 +430,13 @@ class MemoryTracer:
                     delta_max_reserved = after_max_reserved - before_max_reserved
                     
                     # Only show devices with actual memory usage
-                    if before_peak > 0 or after_peak > 0:
+                    if before_peak > 0 or after_peak > 0 or before_allocated > 0 or after_allocated > 0:
                         rows.append([
                             phase,
                             device,
+                            f"{before_allocated:.2f}",
+                            f"{after_allocated:.2f}",
+                            f"{delta_allocated:+.2f}",
                             f"{before_peak:.2f}",
                             f"{after_peak:.2f}",
                             f"{delta_peak:+.2f}",
@@ -435,8 +448,10 @@ class MemoryTracer:
             if rows:
                 log_memory_table(
                     self.logger,
-                    "Peak Actual CUDA Memory Changes per Phase:",
-                    ["Phase", "Device", "Peak Before (MB)", "Peak After (MB)", "Δ Peak", 
+                    "Actual CUDA Memory Changes per Phase:",
+                    ["Phase", "Device", 
+                     "Alloc Before (MB)", "Alloc After (MB)", "Δ Alloc",
+                     "Peak Before (MB)", "Peak After (MB)", "Δ Peak", 
                      "Max Rsrv Before (MB)", "Max Rsrv After (MB)", "Δ Max Rsrv"],
                     rows,
                     level=logging.CRITICAL
